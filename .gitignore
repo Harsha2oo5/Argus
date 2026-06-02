@@ -1,3 +1,7 @@
+echo "venv/
 __pycache__/
-venv/
+*.pyc
 .env
+frontend/node_modules/
+frontend/.next/
+output.csv" > .gitignore
