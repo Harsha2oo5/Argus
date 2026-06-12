@@ -1,7 +1,13 @@
-echo "venv/
+venv/
 __pycache__/
 *.pyc
-.env
+
 frontend/node_modules/
 frontend/.next/
-output.csv" > .gitignore
+
+.env
+output.csv
+samples.csv
+
+.vscode/
+.DS_Store
