@@ -1,6 +1,6 @@
-# 🔍 Agentic Bug Hunter (HBH)
+# 🔍 ARGUS - Software Analysis Platfrom
 
-**Hybrid Bug Hunter** is an enterprise-grade software reasoning platform that combines deterministic static analysis, program graph construction, multi-agent LLM reasoning, evidence-backed confidence scoring, and automated patch planning to detect, validate, localize, and remediate defects in C++ codebases — with full explainability at every step.
+**ARGUS** is an enterprise-grade software reasoning platform that combines deterministic static analysis, program graph construction, multi-agent LLM reasoning, evidence-backed confidence scoring, and automated patch planning to detect, validate, localize, and remediate defects in C++ codebases — with full explainability at every step.
 
 Built across three major engineering phases, the system scales from single-file analysis to multi-million-line enterprise monorepositories.
 
