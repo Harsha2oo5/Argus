@@ -53,6 +53,7 @@ class EnrichedReport:
         explanation_markdowns: Optional[Dict[str, str]] = None,  # rule_id → markdown
         root_cause_summaries: Optional[Dict[str, str]] = None,
         regression_summaries: Optional[Dict[str, str]] = None,
+        structured_patches:   Optional[Dict[str, Any]] = None,  # rule_id → StructuredPatch
         tool_name:           str  = "Hybrid Bug Hunter",
         tool_version:        str  = "3.0.0",
     ):
@@ -60,6 +61,7 @@ class EnrichedReport:
         self.explanations           = explanation_markdowns or {}
         self.root_causes            = root_cause_summaries  or {}
         self.regressions            = regression_summaries  or {}
+        self.patches                = structured_patches    or {}
         self.tool_name              = tool_name
         self.tool_version           = tool_version
         self.generated_at           = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -131,6 +133,7 @@ class ReportGenerator:
                     "explanation": r.explanations.get(f.rule_id),
                     "root_cause":  r.root_causes.get(f.rule_id),
                     "regression":  r.regressions.get(f.rule_id),
+                    "patch":       r.patches.get(f.rule_id).model_dump() if hasattr(r.patches.get(f.rule_id), 'model_dump') else r.patches.get(f.rule_id),
                 }
                 for f in findings
             ],
@@ -164,6 +167,31 @@ class ReportGenerator:
                 if f.line_number:
                     loc["physicalLocation"]["region"] = {"startLine": f.line_number}
                 result["locations"] = [loc]
+            
+            patch = r.patches.get(f.rule_id)
+            if patch is not None:
+                fixes = []
+                for fp in patch.file_patches:
+                    if fp.candidates:
+                        best_cand = fp.candidates[fp.best_candidate_index]
+                        fixes.append({
+                            "description": {"text": best_cand.explanation.why_fix_works if best_cand.explanation else "Apply patch"},
+                            "fileChanges": [{
+                                "artifactLocation": {"uri": fp.file_path.replace("\\", "/")},
+                                "replacements": [{
+                                    "deletedRegion": {
+                                        "startLine": fp.start_line or f.line_number or 1,
+                                        "endLine": fp.end_line or f.line_number or 1,
+                                    },
+                                    "insertedContent": {
+                                        "text": best_cand.patched_code
+                                    }
+                                }]
+                            }]
+                        })
+                if fixes:
+                    result["fixes"] = fixes
+
             sarif_results.append(result)
 
         sarif_doc = {
@@ -221,9 +249,59 @@ class ReportGenerator:
                     f"",
                     f"**Confidence:** {f.static_confidence:.2f}",
                     "",
-                    "---",
-                    "",
                 ])
+
+            # ── Phase 3D.1: append patch section if available ─────────────
+            patch = r.patches.get(f.rule_id)
+            if patch is not None:
+                best_fp   = patch.file_patches[0] if patch.file_patches else None
+                best_cand = (
+                    best_fp.candidates[best_fp.best_candidate_index]
+                    if best_fp and best_fp.candidates else None
+                )
+                lines.extend([
+                    f"### 🔧 Autonomous Patch  `{patch.patch_id[:8]}`",
+                    f"",
+                    f"| Property | Value |",
+                    f"|----------|-------|",
+                    f"| Repair category | `{patch.repair_category.value}` |",
+                    f"| Candidates | {len(best_fp.candidates) if best_fp else 0} |",
+                    f"| Best confidence | "
+                    f"{best_cand.confidence:.2f}" if best_cand else "n/a",
+                    f"| Provider | `{patch.generation_metadata.provider}` |",
+                    f"| Generation time | {patch.generation_metadata.generation_time_ms:.0f} ms |",
+                    f"",
+                ])
+                if best_cand and best_cand.unified_diff:
+                    lines.extend([
+                        f"**Proposed diff (best candidate):**",
+                        f"",
+                        f"```diff",
+                        best_cand.unified_diff.strip(),
+                        f"```",
+                        f"",
+                    ])
+                if best_cand and best_cand.explanation:
+                    exp = best_cand.explanation
+                    lines.extend([
+                        f"**Why the bug occurred:** {exp.why_bug_occurred}",
+                        f"",
+                        f"**Why the fix works:** {exp.why_fix_works}",
+                        f"",
+                        f"**Trade-offs:** {exp.trade_offs}",
+                        f"",
+                    ])
+                if patch.warnings:
+                    lines.append("**⚠️ Warnings:**")
+                    for w in patch.warnings:
+                        lines.append(f"- {w}")
+                    lines.append("")
+                if patch.dependencies:
+                    lines.append(f"**Dependencies:** {', '.join(patch.dependencies)}")
+                    lines.append("")
+
+            lines.extend(["---", ""])
+
         return "\n".join(lines).encode("utf-8")
 
     def _generate_html(self, r: EnrichedReport) -> bytes:

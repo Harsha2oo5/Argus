@@ -1,10 +1,11 @@
 """
-Detection Orchestrator  (§109)
-================================
-End-to-end pipeline entry point combining all Phase 3C.2 subsystems.
+Detection Orchestrator  (§109 + Phase 3D.1)
+=============================================
+End-to-end pipeline entry point combining all Phase 3C.2 and 3D.1 subsystems.
 This façade is the single interface callers use for full analysis; it
 coordinates AnalysisEngine, RootCauseAnalyzer, BugLocalizer, CrossFileReasoner,
-PatchPlanningEngine, RemediationReasoner, RegressionAnalyzer, and ReportGenerator.
+PatchPlanningEngine, RemediationReasoner, RegressionAnalyzer, ReportGenerator,
+and (optionally) PatchGenerationEngine.
 
 Usage
 -----
@@ -37,12 +38,15 @@ Execution order
          ↓
     regression impact            (RegressionAnalyzer per remediation plan)
          ↓
+    patch generation [OPTIONAL]  (PatchGenerationEngine per finding — Phase 3D.1)
+         ↓
     report generation            (ReportGenerator — JSON, SARIF, Markdown)
 """
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from backend.core.analysis.engine import AnalysisEngine, EnrichedFinding
 from backend.core.analysis.schemas import NormalizedFinding, AnalysisReport
@@ -56,6 +60,16 @@ from backend.core.analysis.regression import RegressionAnalyzer, RegressionImpac
 from backend.core.analysis.report import ReportGenerator, ReportFormat, EnrichedReport
 from backend.core.ai.memory.semantic import SemanticMemory
 
+# Phase 3D.1 — optional patch generation integration
+try:
+    from backend.core.patch_generation.patch_generator import PatchGenerationEngine
+    from backend.core.patch_generation.patch_models import StructuredPatch
+    _PATCH_GENERATION_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    PatchGenerationEngine = None  # type: ignore[assignment,misc]
+    StructuredPatch       = None  # type: ignore[assignment,misc]
+    _PATCH_GENERATION_AVAILABLE = False
+
 logger = logging.getLogger("backend.analysis.detection_orchestrator")
 
 
@@ -65,13 +79,15 @@ logger = logging.getLogger("backend.analysis.detection_orchestrator")
 
 @dataclass
 class FindingAnalysis:
-    """All Phase 3C.2 artefacts for a single finding."""
-    enriched:    EnrichedFinding
-    spans:       List[CodeSpan]
-    root_cause:  RootCauseChain
-    patch_plan:  PatchPlan
-    remediation: RemediationPlan
-    regression:  RegressionImpactReport
+    """All Phase 3C.2 + 3D.1 artefacts for a single finding."""
+    enriched:       EnrichedFinding
+    spans:          List[CodeSpan]
+    root_cause:     RootCauseChain
+    patch_plan:     PatchPlan
+    remediation:    RemediationPlan
+    regression:     RegressionImpactReport
+    # Phase 3D.1 — populated when a PatchGenerationEngine is configured
+    structured_patch: Optional[Any] = None  # StructuredPatch | None
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +104,9 @@ class OrchestratorResult:
     markdown_report:    bytes
     html_report:        bytes
     duration_seconds:   float
-    suppressed_count:   int = 0
+    suppressed_count:   int  = 0
+    # Phase 3D.1 — patch_id → StructuredPatch mapping for each finding
+    structured_patches: Dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -114,17 +132,20 @@ class DetectionOrchestrator:
         repo_graph:           Optional[RepositoryKnowledgeGraph] = None,
         min_confidence:       float = 0.30,
         max_traversal_depth:  int   = 5,
+        patch_engine:         Optional[Any] = None,  # PatchGenerationEngine | None
     ):
         mem = semantic_memory or SemanticMemory()
-        self._graph      = repo_graph or RepositoryKnowledgeGraph()
-        self._engine     = AnalysisEngine(semantic_memory=mem, min_confidence=min_confidence)
-        self._localizer  = BugLocalizer()
-        self._cross_file = CrossFileReasoner(max_depth=max_traversal_depth)
-        self._root_cause = RootCauseAnalyzer()
-        self._patcher    = PatchPlanningEngine()
-        self._remediator = RemediationReasoner(semantic_memory=mem)
-        self._regression = RegressionAnalyzer()
-        self._reporter   = ReportGenerator()
+        self._graph        = repo_graph or RepositoryKnowledgeGraph()
+        self._engine       = AnalysisEngine(semantic_memory=mem, min_confidence=min_confidence)
+        self._localizer    = BugLocalizer()
+        self._cross_file   = CrossFileReasoner(max_depth=max_traversal_depth)
+        self._root_cause   = RootCauseAnalyzer()
+        self._patcher      = PatchPlanningEngine()
+        self._remediator   = RemediationReasoner(semantic_memory=mem)
+        self._regression   = RegressionAnalyzer()
+        self._reporter     = ReportGenerator()
+        # Phase 3D.1 — optional; if not provided, patch generation is skipped
+        self._patch_engine: Optional[Any] = patch_engine
 
     # ------------------------------------------------------------------
     # Public API
@@ -137,7 +158,7 @@ class DetectionOrchestrator:
         file_path: Optional[str] = None,
     ) -> OrchestratorResult:
         """
-        Execute the full Phase 3C.2 pipeline and return an OrchestratorResult.
+        Execute the full Phase 3C.2 + 3D.1 pipeline and return an OrchestratorResult.
 
         Parameters
         ----------
@@ -156,7 +177,7 @@ class DetectionOrchestrator:
         analyses: List[FindingAnalysis] = []
 
         for ef in enriched_findings:
-            fa = self._analyse_finding(ef)
+            fa = self._analyse_finding(ef, source_code=code)
             analyses.append(fa)
 
         # ── 3. Build plain NormalizedFinding list for AnalysisReport ──
@@ -173,7 +194,14 @@ class DetectionOrchestrator:
             if ef.explanation:
                 explanation_md[ef.finding.rule_id] = ef.explanation.markdown
 
-        # ── 5. Generate reports ────────────────────────────────────────
+        # ── 5. Collect structured patches (Phase 3D.1) ─────────────────
+        structured_patches: Dict[str, Any] = {
+            fa.enriched.finding.rule_id: fa.structured_patch
+            for fa in analyses
+            if fa.structured_patch is not None
+        }
+
+        # ── 6. Generate reports ────────────────────────────────────────
         enriched_report = EnrichedReport(
             report=analysis_report,
             explanation_markdowns=explanation_md,
@@ -191,6 +219,7 @@ class DetectionOrchestrator:
                 )
                 for fa in analyses
             },
+            structured_patches=structured_patches,
         )
 
         json_bytes     = self._reporter.generate(enriched_report, ReportFormat.JSON)
@@ -200,8 +229,10 @@ class DetectionOrchestrator:
 
         duration = time.perf_counter() - t0
         logger.info(
-            "DetectionOrchestrator complete: %d findings, %d suppressed, %.3fs.",
-            len(enriched_findings), suppressed_count, duration,
+            "DetectionOrchestrator complete: %d findings, %d suppressed, "
+            "%d patch(es) generated, %.3fs.",
+            len(enriched_findings), suppressed_count,
+            len(structured_patches), duration,
         )
 
         return OrchestratorResult(
@@ -213,14 +244,23 @@ class DetectionOrchestrator:
             html_report=html_bytes,
             duration_seconds=round(duration, 4),
             suppressed_count=suppressed_count,
+            structured_patches=structured_patches,
         )
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _analyse_finding(self, ef: EnrichedFinding) -> FindingAnalysis:
-        """Run per-finding deep analysis: localize → root cause → patch → remediate → regression."""
+    def _analyse_finding(
+        self,
+        ef:          EnrichedFinding,
+        source_code: str = "",
+    ) -> FindingAnalysis:
+        """
+        Run per-finding deep analysis:
+        localize → root cause → patch plan → remediate → regression →
+        [optional] patch generation (Phase 3D.1).
+        """
         f = ef.finding
 
         # Localization
@@ -245,7 +285,59 @@ class DetectionOrchestrator:
             len(pp.strategies),
             len(reg.affected_components),
         )
+
+        # ── Phase 3D.1: autonomous patch generation (optional) ────────
+        structured_patch: Optional[Any] = None
+        if self._patch_engine is not None and source_code:
+            try:
+                # Run the async generate() in the current event loop, or
+                # create a new one if we are in a synchronous context.
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # In an already-running loop (e.g. FastAPI)
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                            future = ex.submit(
+                                asyncio.run,
+                                self._patch_engine.generate(
+                                    finding    = f,
+                                    code       = source_code,
+                                    root_cause = rc,
+                                    evidence   = ef.evidence_graph if hasattr(ef, 'evidence_graph') else None,
+                                    bug_id     = f.rule_id,
+                                )
+                            )
+                            structured_patch = future.result(timeout=60)
+                    else:
+                        structured_patch = loop.run_until_complete(
+                            self._patch_engine.generate(
+                                finding    = f,
+                                code       = source_code,
+                                root_cause = rc,
+                                evidence   = ef.evidence_graph if hasattr(ef, 'evidence_graph') else None,
+                                bug_id     = f.rule_id,
+                            )
+                        )
+                except RuntimeError:
+                    structured_patch = asyncio.run(
+                        self._patch_engine.generate(
+                            finding    = f,
+                            code       = source_code,
+                            root_cause = rc,
+                            evidence   = ef.evidence_graph if hasattr(ef, 'evidence_graph') else None,
+                            bug_id     = f.rule_id,
+                        )
+                    )
+            except Exception as patch_err:
+                logger.warning(
+                    "DetectionOrchestrator: patch generation failed for '%s': %s — "
+                    "continuing without patch.",
+                    f.rule_id, patch_err,
+                )
+
         return FindingAnalysis(
             enriched=ef, spans=spans, root_cause=rc,
             patch_plan=pp, remediation=rp, regression=reg,
+            structured_patch=structured_patch,
         )
