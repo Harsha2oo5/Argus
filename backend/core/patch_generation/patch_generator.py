@@ -388,12 +388,18 @@ class PatchGenerationEngine:
         last_error: Optional[Exception] = None
         backoff    = self._config.retry_backoff
 
+        from backend.core.ai.router import ModelRoutingEngine
+        route = ModelRoutingEngine().route_task("complex_fix")
+
         for attempt in range(self._config.max_retries + 1):
             try:
                 raw = await self._provider.generate_completion_async(
-                    prompt        = user_prompt,
-                    system_prompt = system_prompt,
+                    prompt          = user_prompt,
+                    system_prompt   = system_prompt,
                     response_format = {"type": "json_object"},
+                    model           = route.get("model"),
+                    temperature     = self._config.temperature,
+                    max_tokens      = self._config.max_tokens,
                 )
                 if raw:
                     return raw, attempt

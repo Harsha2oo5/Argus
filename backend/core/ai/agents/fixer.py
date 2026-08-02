@@ -15,10 +15,16 @@ class FixerAgent(BaseAgent):
             code=code
         )
 
+        from backend.core.ai.router import ModelRoutingEngine
+        route = ModelRoutingEngine().route_task("complex_fix")
+
         response = await self.provider.generate_completion_async(
             prompt=prompt,
             system_prompt=SYSTEM_INSTRUCTION,
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            model=route.get("model"),
+            temperature=route.get("temperature"),
+            max_tokens=route.get("max_tokens")
         )
 
         fallback = CodeCorrection(corrected_code=finding.get("line_text", ""))

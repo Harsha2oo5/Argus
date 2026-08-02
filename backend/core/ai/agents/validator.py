@@ -17,10 +17,16 @@ class ValidatorAgent(BaseAgent):
             code=code
         )
 
+        from backend.core.ai.router import ModelRoutingEngine
+        route = ModelRoutingEngine().route_task("static_validation")
+
         response = await self.provider.generate_completion_async(
             prompt=prompt,
             system_prompt=SYSTEM_INSTRUCTION,
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            model=route.get("model"),
+            temperature=route.get("temperature"),
+            max_tokens=route.get("max_tokens")
         )
 
         # Fallback values if API fails or returns invalid format

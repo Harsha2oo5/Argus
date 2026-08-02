@@ -10,7 +10,10 @@ class BaseLLMProvider(ABC):
         self,
         prompt: str,
         system_prompt: Optional[str] = None,
-        response_format: Optional[Any] = None
+        response_format: Optional[Any] = None,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> Optional[str]:
         """
         Execute an asynchronous completion task.
