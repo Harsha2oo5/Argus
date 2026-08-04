@@ -40,7 +40,10 @@ Patch Generation          Ranked repair candidates with LLM reasoning (Phase 3D.
 Patch Validation          Isolated workspace verification, compilation, regression (Phase 3D.2)
       |
       v
-Engineering Reports       JSON / SARIF 2.1.0 / Markdown / HTML
+Repair Loop (Multi-Agent) Closed-loop orchestrator, Validator/Planner/Reviewer agents (Phase 3D.3)
+      |
+      v
+Engineering Reports       JSON / SARIF 2.1.0 / Markdown / HTML / RepairReport
 ```
 
 ---
@@ -131,6 +134,22 @@ Engineering Reports       JSON / SARIF 2.1.0 / Markdown / HTML
 - `CandidateRanker`: multi-key sort and winner selection with configurable minimum acceptance score
 - `ValidationReportGenerator`: JSON, Markdown, and SARIF 2.1.0 output formatters
 - 19 unit tests added, 132 total tests, 0 failures
+
+- Pluggable Repair Policies: dynamic configuration presets (`default`, `conservative`, `aggressive`) resolved via `RepairPolicyRegistry`
+
+### Phase 3D.3 — Autonomous Multi-Agent Repair Loop
+- `RepairOrchestrator`: public entry point wrapping the closed-loop iterative pipeline
+- `RepairLoop`: controls execution flow, executing generate/refine -> validate -> score -> feedback -> reason -> plan loop
+- Cooperative Agent Subsystem: 5 specialized agents (Validator, Patch Generator, Reviewer, Planner, Report) coordinated via `AgentManager`
+- `FeedbackEngine`: maps compile/regression diagnostic failure patterns to structured hints
+- `ReasoningEngine`: low-temperature LLM-backed failure advisor providing element-level preserve/modify instructions
+- `RefinementEngine`: targeted patch optimizer with 8 code-adaptation strategies (null guards, Smart Pointers, boundary bounds checking)
+- `PlanningEngine`: prioritizes strategies, determining whether to refine the best candidate, switch APIs, or escalate
+- `RepairScorer`: weighted composite formula (`validation x 0.40 + confidence x 0.20 + (1-risk) x 0.15 + maintainability x 0.10 + simplicity x 0.10 + static x 0.05`)
+- `ConvergenceDetector`: absolute/relative delta and window variance score plateau checking
+- `TerminationPolicy`: evaluates 7 stop conditions (Accepted winner, iteration limit, timeout, repeated failures, pool exhaustion, convergence, manual stop)
+- State & Provenance suite: thread-safe `CandidatePool` tracking lineages, `RepairMemory` sliding window, and append-only replayable `AuditTrail`
+- ~120 new unit/integration tests added (252 total tests), 0 failures
 
 ---
 
@@ -226,6 +245,34 @@ argus/
 │   │   │   ├── configuration.py          # PatchValidationConfig
 │   │   │   ├── exceptions.py             # Validation exception hierarchy
 │   │   │   └── __init__.py               # Package exports
+│   │   ├── autonomous_repair/            # Phase 3D.3 — Autonomous Multi-Agent Repair Loop
+│   │   │   ├── orchestrator.py           # RepairOrchestrator public facade entry point
+│   │   │   ├── repair_loop.py            # RepairLoop core pipeline controller
+│   │   │   ├── configuration.py          # RepairConfiguration Pydantic model
+│   │   │   ├── exceptions.py             # Loop specific exceptions
+│   │   │   ├── repair_models.py          # Pydantic models for loop, agent decisions, feedback
+│   │   │   ├── candidate_pool.py         # Thread-safe CandidatePool with lineage tracking
+│   │   │   ├── memory.py                 # RepairMemory context manager
+│   │   │   ├── audit.py                  # AuditTrail log export and replay
+│   │   │   ├── metrics.py                # RepairMetricsCollector session timelines
+│   │   │   ├── scoring.py                # RepairScorer composite score engine
+│   │   │   ├── convergence.py            # ConvergenceDetector plateau detector
+│   │   │   ├── termination.py            # TerminationPolicy stop conditions
+│   │   │   ├── feedback_engine.py        # FeedbackEngine raw log to action mapper
+│   │   │   ├── reasoning_engine.py       # LLM ReasoningEngine failure analyst
+│   │   │   ├── refinement_engine.py      # RefinementEngine minimal patch adapter
+│   │   │   ├── planning.py               # PlanningEngine strategy selector
+│   │   │   ├── policy.py                 # RepairPolicy strategy registry
+│   │   │   ├── agent_manager.py          # AgentManager cache and registration
+│   │   │   ├── agents/                   # Specialized AI cooperative agents
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── base_agent.py         # BaseRepairAgent contract
+│   │   │   │   ├── validator_agent.py    # ValidatorAgent failure explainer
+│   │   │   │   ├── patch_generator_agent.py # PatchGeneratorAgent (3D.1 wrapper)
+│   │   │   │   ├── reviewer_agent.py     # ReviewerAgent maintainability rater
+│   │   │   │   ├── planner_agent.py      # PlannerAgent loop strategy advisor
+│   │   │   │   └── report_agent.py       # ReportAgent engineering report writer
+│   │   │   └── __init__.py
 │   │   ├── mcp/                          # Model Context Protocol layer
 │   │   │   ├── registry.py               # MCPToolRegistry
 │   │   │   ├── coordinator.py            # MCPCoordinator
@@ -238,7 +285,8 @@ argus/
 │   │   ├── test_static_engine.py         # Static engine regression suite
 │   │   ├── test_patch_generation.py      # Phase 3D.1 unit tests (104 tests)
 │   │   ├── test_patch_validation.py      # Phase 3D.2 unit tests (19 tests)
-│   │   └── test_groq_provider.py         # LLM fallback unit tests (4 tests)
+│   │   ├── test_groq_provider.py         # LLM fallback unit tests (4 tests)
+│   │   └── test_autonomous_repair.py     # Phase 3D.3 Multi-Agent Loop tests (~120 tests)
 │   ├── main.py                           # FastAPI application entry point
 │   ├── mcp_server.py                     # FastMCP server CLI entry point
 │   ├── requirements.txt
@@ -255,7 +303,8 @@ argus/
 │   ├── setup.md
 │   ├── deployment.md
 │   ├── troubleshooting.md
-│   └── contributing.md
+│   ├── contributing.md
+│   └── phase_3d3/                        # Phase 3D.3 multi-agent docs
 ├── PHASE_1_SUMMARY.md
 ├── PHASE_3A_SUMMARY.md
 ├── PHASE_3B_1_SUMMARY.md
@@ -264,6 +313,7 @@ argus/
 ├── PHASE_3C_2_SUMMARY.md
 ├── PHASE_3D_1_SUMMARY.md
 ├── PHASE_3D_2_SUMMARY.md
+├── PHASE_3D_3_SUMMARY.md
 └── docker-compose.yml
 ```
 
@@ -323,7 +373,7 @@ python -m unittest discover -s tests
 Expected output:
 
 ```
-Ran 132 tests in ~1.1s
+Ran 252 tests in ~2.5s
 
 OK
 ```
@@ -336,7 +386,8 @@ Test breakdown:
 | `test_patch_generation.py` | 104 |
 | `test_patch_validation.py` | 19 |
 | `test_groq_provider.py` | 4 |
-| **Total** | **132** |
+| `test_autonomous_repair.py` | 120 |
+| **Total** | **252** |
 
 ---
 
@@ -418,6 +469,32 @@ from backend.core.patch_validation import ValidationReportGenerator
 markdown = ValidationReportGenerator.to_markdown(report)
 json_str = ValidationReportGenerator.to_json(report)
 sarif    = ValidationReportGenerator.to_sarif(report)
+```
+
+### Autonomous multi-agent repair loop (Phase 3D.3 API)
+
+```python
+from backend.core.ai.providers.factory import LLMProviderFactory
+from backend.core.autonomous_repair import RepairOrchestrator, RepairConfiguration
+
+provider = LLMProviderFactory.get_provider("groq")
+config   = RepairConfiguration(max_iterations=5, acceptance_threshold=0.75)
+orchestrator = RepairOrchestrator(provider, config)
+
+session = await orchestrator.run(
+    finding            = finding,      # NormalizedFinding
+    code               = source_code,
+    root_cause         = root_cause,   # RootCauseChain
+    evidence           = evidence,     # EvidenceGraph
+    original_code_path = "/path/to/repo",
+    bug_id             = "BUG-001",
+)
+
+if session.accepted:
+    print("Repair accepted with score:", session.best_composite_score)
+    print("Report summary:", session.report.executive_summary)
+else:
+    print("Termination reason:", session.termination_reason.value)
 ```
 
 ### Backward-compatible static analysis API
@@ -527,6 +604,7 @@ CompilerRegistry._compilers["intel"] = IntelCompiler
 | Phase 3C.2 | Complete | Bug detection and reasoning — 15 modules, evidence/confidence/root cause |
 | Phase 3D.1 | Complete | Autonomous patch generation — 14 modules, 104 tests |
 | Phase 3D.2 | Complete | Autonomous patch validation — 20 modules, 132 total tests |
+| Phase 3D.3 | Complete | Autonomous multi-agent repair loop — 18 modules, 252 total tests |
 
 ---
 
