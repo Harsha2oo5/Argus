@@ -93,9 +93,20 @@ class AnalysisEngine:
         self,
         code:      str,
         extension: str = "cpp",
+        file_path: Optional[str] = None,
     ) -> List[EnrichedFinding]:
         """
         Run the full analysis pipeline against *code*.
+
+        Parameters
+        ----------
+        code      : Source code to analyse.
+        extension : File extension used for parser and rule resolution.
+        file_path : Optional path of the analysed file.  When supplied it is
+                    stamped onto every finding, which enables downstream
+                    localization, cross-file reasoning, regression impact
+                    analysis, and SARIF physical locations.  Rules do not set
+                    it themselves because they only ever see the code string.
 
         Returns a list of EnrichedFinding objects for findings that passed
         all validation and suppression stages.  Suppressed findings are
@@ -120,9 +131,19 @@ class AnalysisEngine:
             except Exception as exc:
                 logger.error("Rule execution failure [%s]: %s", rule.rule_id, exc)
 
+        # Stamp the source location onto every finding. Rules only ever see a
+        # code string, so file_path can only be attached here.
+        if file_path:
+            for f in raw_findings:
+                f.file_path = file_path
+
         # ── 3. Per-finding Phase 3C.2 pipeline ────────────────────────
         validated_findings: List[NormalizedFinding] = []
-        enrichments:        Dict[str, Any]           = {}  # rule_id → dict
+        # Keyed by object identity, NOT rule_id: a single rule can fire many
+        # times in one file and each occurrence has its own evidence graph,
+        # confidence result, and explanation. `validated_findings` keeps every
+        # key object alive for the lifetime of this call.
+        enrichments:        Dict[int, Any]           = {}
 
         for f in raw_findings:
             # 3a. Evidence graph
@@ -148,7 +169,7 @@ class AnalysisEngine:
                 confidence=cr,
             )
 
-            enrichments[f_out.rule_id] = {
+            enrichments[id(f_out)] = {
                 "evidence_graph":    eg,
                 "confidence_result": cr,
                 "explanation":       exp,
@@ -162,7 +183,7 @@ class AnalysisEngine:
         # ── 5. Build EnrichedFinding list ─────────────────────────────
         enriched: List[EnrichedFinding] = []
         for f in passed:
-            enr = enrichments.get(f.rule_id, {})
+            enr = enrichments.get(id(f), {})
             enriched.append(EnrichedFinding(
                 finding=f,
                 evidence_graph=enr.get("evidence_graph"),
@@ -186,10 +207,11 @@ class AnalysisEngine:
         self,
         code:      str,
         extension: str = "cpp",
+        file_path: Optional[str] = None,
     ) -> List[NormalizedFinding]:
         """
         Backward-compatible wrapper: returns plain NormalizedFinding list.
         Used by existing API routes and MCP tools that pre-date Phase 3C.2.
         """
-        return [ef.finding for ef in self.analyze(code, extension)]
+        return [ef.finding for ef in self.analyze(code, extension, file_path)]
 

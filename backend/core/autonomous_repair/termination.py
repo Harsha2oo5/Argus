@@ -99,7 +99,11 @@ class TerminationPolicy:
 
         # ── Policy-gated conditions ───────────────────────────────────
         if policy in ("any", "iteration_limit"):
-            if iteration_index >= self._cfg.max_iterations:
+            # iteration_index is 0-based and this runs *after* the iteration
+            # has completed, so the run has executed (iteration_index + 1)
+            # iterations. Comparing the raw index against max_iterations
+            # allowed one extra pass (6 iterations for max_iterations=5).
+            if iteration_index + 1 >= self._cfg.max_iterations:
                 return self._log_and_return(TerminationReason.ITERATION_LIMIT, iteration_index)
 
         if policy == "any":

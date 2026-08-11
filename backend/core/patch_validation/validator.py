@@ -59,6 +59,11 @@ class CandidateValidator:
         regression_success = False
         new_bug_count = 0
         warning_delta = 0
+        # Track whether each optional dimension actually produced a result, so
+        # a disabled or crashed stage is excluded from scoring rather than
+        # counted as a failure.
+        static_evaluated = False
+        regression_evaluated = False
 
         # Target file resolution in workspace
         workspace_file = os.path.join(workspace.path, file_path)
@@ -158,7 +163,8 @@ class CandidateValidator:
                 bug_removed = reanalysis_res.original_bug_removed
                 new_bug_count = reanalysis_res.new_findings_count
                 warning_delta += reanalysis_res.warning_delta
-                
+                static_evaluated = True
+
                 collector.record_timing("static_validation", (time.perf_counter() - t0) * 1000)
                 
                 if not bug_removed:
@@ -179,7 +185,8 @@ class CandidateValidator:
                     timeout=self.config.timeout_seconds
                 )
                 regression_success = regression_res.success
-                
+                regression_evaluated = True
+
                 collector.record_timing("regression_testing", (time.perf_counter() - t0) * 1000)
 
                 if not regression_success:
@@ -207,7 +214,9 @@ class CandidateValidator:
             warning_delta=warning_delta,
             lines_changed=lines_changed,
             patch_size=patch_size,
-            duration_ms=duration_ms
+            duration_ms=duration_ms,
+            static_evaluated=static_evaluated,
+            regression_evaluated=regression_evaluated,
         )
 
         return metrics, collector

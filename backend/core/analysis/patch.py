@@ -148,11 +148,7 @@ class PatchPlanningEngine:
         # --- S3: defensive guard upstream --------------------------------
         callers = []
         if finding.file_path:
-            file_syms = [
-                s.name for s in graph.symbols.values()
-                if s.file_path == finding.file_path
-            ]
-            for sym in file_syms:
+            for sym in sorted(graph.symbol_names_in_file(finding.file_path)):
                 callers.extend(graph.get_callers(sym))
 
         s3 = RepairStrategy(

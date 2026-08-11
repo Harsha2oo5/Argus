@@ -232,14 +232,13 @@ class RefinementEngine:
         confidence = float(data.get("confidence", max(0.1, parent.confidence - 0.05)))
         confidence = max(0.0, min(1.0, confidence))
 
-        # Generate diff
-        diff_lines = list(self._diff_gen._generate_diff(
+        # Generate diff (UnifiedDiffGenerator.generate builds the a/ and b/
+        # headers itself and returns a ready-joined unified diff string).
+        unified_diff = self._diff_gen.generate(
             parent.original_code,
             patched_code,
-            f"a/{file_path}",
-            f"b/{file_path}",
-        ))
-        unified_diff = "\n".join(diff_lines)
+            file_path=file_path or None,
+        )
 
         refined = PatchCandidate(
             candidate_id=str(uuid.uuid4())[:8],

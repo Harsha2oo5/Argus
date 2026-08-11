@@ -232,6 +232,20 @@ class BuildSystemRegistry:
     }
 
     @classmethod
+    def register(cls, name: str, system_class) -> None:
+        """
+        Register a build system backend.
+
+            BuildSystemRegistry.register("meson", MesonBuildSystem)
+        """
+        cls._systems[name.lower()] = system_class
+
+    @classmethod
+    def available(cls) -> list:
+        """Return every registered build system name."""
+        return sorted(cls._systems)
+
+    @classmethod
     def get_build_system(cls, name: str) -> BaseBuildSystem:
         """Get build system class by name (defaults to NoneBuildSystem)."""
         system_class = cls._systems.get(name.lower(), NoneBuildSystem)

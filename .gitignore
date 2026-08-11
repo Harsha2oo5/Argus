@@ -11,3 +11,10 @@ samples.csv
 
 .vscode/
 .DS_Store
+
+# Stray tooling output
+project_tree.txt
+.pytest_cache/
+*.egg-info/
+frontend/tsconfig.tsbuildinfo
+nohup.out

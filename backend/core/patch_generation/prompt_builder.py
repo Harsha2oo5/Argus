@@ -168,12 +168,15 @@ class PatchPromptBuilder:
 
         prompt = "\n\n".join(s for s in sections if s.strip())
 
-        # Token budget validation
+        # Token budget validation.
+        # Compare against the *input* budget: config.max_tokens bounds the
+        # completion the model writes back, not the prompt we send it, so
+        # checking the prompt against it was measuring the wrong axis.
         estimated_tokens = len(prompt) // _CHARS_PER_TOKEN
-        if estimated_tokens > self._config.max_tokens:
+        if estimated_tokens > self._config.max_prompt_tokens:
             raise PromptOverflowError(
                 prompt_tokens=estimated_tokens,
-                max_tokens=self._config.max_tokens,
+                max_tokens=self._config.max_prompt_tokens,
                 details={"section_lengths": {f"s{i}": len(s) for i, s in enumerate(sections)}},
             )
 

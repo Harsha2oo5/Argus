@@ -10,7 +10,9 @@ class ValidatorAgent(BaseAgent):
 
     async def validate_finding(self, code: str, finding: dict) -> BugValidationResult:
         prompt = VALIDATOR_PROMPT.format(
-            rule_tag=finding.get("rule_tag", "unknown"),
+            # NormalizedFinding exposes this as `rule_id`; accept either so the
+            # prompt never degrades to "Rule: unknown".
+            rule_tag=finding.get("rule_id") or finding.get("rule_tag") or "unknown",
             description=finding.get("description", "No description"),
             line_number=finding.get("line_number", "?"),
             line_text=finding.get("line_text", ""),

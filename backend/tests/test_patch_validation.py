@@ -146,8 +146,7 @@ class TestCompilerAndRegistry(unittest.TestCase):
         compiler = CompilerRegistry.get_compiler("gcc")
         self.assertIsInstance(compiler, GCCCompiler)
 
-        loop = asyncio.get_event_loop()
-        res = loop.run_until_complete(compiler.compile(
+        res = asyncio.run(compiler.compile(
             workspace_path="dummy",
             source_files=["main.cpp"],
             timeout=10
@@ -165,8 +164,7 @@ class TestCompilerAndRegistry(unittest.TestCase):
         compiler = CompilerRegistry.get_compiler("clang")
         self.assertIsInstance(compiler, ClangCompiler)
 
-        loop = asyncio.get_event_loop()
-        res = loop.run_until_complete(compiler.compile(
+        res = asyncio.run(compiler.compile(
             workspace_path="dummy",
             source_files=["main.cpp"],
             timeout=10
@@ -188,8 +186,7 @@ class TestBuildSystem(unittest.TestCase):
         build_sys = BuildSystemRegistry.get_build_system("cmake")
         self.assertIsInstance(build_sys, CMakeBuildSystem)
 
-        loop = asyncio.get_event_loop()
-        success = loop.run_until_complete(build_sys.configure("dummy", "gcc"))
+        success = asyncio.run(build_sys.configure("dummy", "gcc"))
         self.assertTrue(success)
 
 
@@ -248,8 +245,7 @@ class TestRegression(unittest.TestCase):
         mock_shell.return_value = mock_proc
 
         runner = RegressionRunner()
-        loop = asyncio.get_event_loop()
-        res = loop.run_until_complete(runner.run_tests(
+        res = asyncio.run(runner.run_tests(
             workspace_path="dummy",
             discovered_tests=[{"name": "test_suite", "cmd": "ctest", "framework": "ctest"}],
             timeout=10
@@ -290,6 +286,112 @@ class TestMetricsCalculator(unittest.TestCase):
             duration_ms=150.0
         )
         self.assertEqual(metrics.score, 0.0)
+
+    def test_disabled_regression_does_not_cap_the_score(self):
+        """
+        A dimension that was never evaluated must be excluded, not counted as
+        a failure. Scoring it zero capped the total at 0.5, below the default
+        0.7 acceptance threshold, so no candidate could ever be accepted with
+        regression testing turned off.
+        """
+        calc = QualityMetricsCalculator()
+        metrics = calc.compute_metrics(
+            compilation_success=True,
+            syntax_success=True,
+            bug_removed=True,
+            regression_success=False,
+            new_bug_count=0,
+            warning_delta=0,
+            lines_changed=5,
+            patch_size=100,
+            duration_ms=150.0,
+            regression_evaluated=False,
+        )
+        self.assertEqual(metrics.score, 0.8)
+        self.assertGreaterEqual(metrics.score, PatchValidationConfig().min_acceptance_score)
+
+    def test_disabled_static_analysis_does_not_cap_the_score(self):
+        calc = QualityMetricsCalculator()
+        metrics = calc.compute_metrics(
+            compilation_success=True,
+            syntax_success=True,
+            bug_removed=False,
+            regression_success=True,
+            new_bug_count=0,
+            warning_delta=0,
+            lines_changed=5,
+            patch_size=100,
+            duration_ms=150.0,
+            static_evaluated=False,
+        )
+        self.assertEqual(metrics.score, 0.8)
+
+    def test_evaluated_failure_still_penalised(self):
+        """Excluding *unevaluated* dimensions must not excuse real failures."""
+        calc = QualityMetricsCalculator()
+        metrics = calc.compute_metrics(
+            compilation_success=True,
+            syntax_success=True,
+            bug_removed=True,
+            regression_success=False,
+            new_bug_count=0,
+            warning_delta=0,
+            lines_changed=5,
+            patch_size=100,
+            duration_ms=150.0,
+            regression_evaluated=True,
+        )
+        self.assertLess(metrics.score, 0.7)
+
+    def test_new_bugs_penalty_applies(self):
+        calc = QualityMetricsCalculator()
+        metrics = calc.compute_metrics(
+            True, True, True, True, 2, 0, 5, 100, 150.0
+        )
+        self.assertAlmostEqual(metrics.score, 0.5, places=3)
+
+
+class TestSyntaxValidatorLineNumbers(unittest.TestCase):
+    """
+    _clean_code used to delete comments and literals, which shifted every
+    character index out of alignment with the original text the line numbers
+    were computed from.
+    """
+
+    def setUp(self):
+        from backend.core.patch_validation.syntax_validator import SyntaxValidator
+        self.validator = SyntaxValidator()
+
+    def test_braces_inside_comments_and_strings_are_ignored(self):
+        code = (
+            '// a comment with { and ( \n'
+            'const char* s = "} ) {";\n'
+            '/* block } { */\n'
+            'void f() {\n'
+            '}\n'
+        )
+        ok, errors = self.validator.validate_code(code)
+        self.assertTrue(ok, f"unexpected errors: {errors}")
+
+    def test_unbalanced_brace_reports_correct_line(self):
+        code = (
+            '// filler comment\n'
+            'const char* s = "a string";\n'
+            '/* multi\n'
+            '   line */\n'
+            'void f() {\n'
+            '    g();\n'
+        )
+        ok, errors = self.validator.validate_code(code)
+        self.assertFalse(ok)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("line 5", errors[0])
+
+    def test_mismatched_closer_reports_correct_line(self):
+        code = 'int a = 1;\n// comment\nvoid f() (\n}\n'
+        ok, errors = self.validator.validate_code(code)
+        self.assertFalse(ok)
+        self.assertTrue(any("line 4" in e for e in errors), errors)
 
 
 class TestCandidateRanker(unittest.TestCase):
@@ -401,8 +503,7 @@ class TestValidationEngineEndToEnd(unittest.TestCase):
         config = PatchValidationConfig(workspace_type="temp_dir", min_acceptance_score=0.5)
         engine = ValidationEngine(config)
 
-        loop = asyncio.get_event_loop()
-        report = loop.run_until_complete(engine.validate_patch(
+        report = asyncio.run(engine.validate_patch(
             patch=patch_obj,
             original_code_path="dummy_original"
         ))

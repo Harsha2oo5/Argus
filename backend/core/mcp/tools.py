@@ -35,13 +35,21 @@ async def mcp_batch_analyze(samples_csv_path: str) -> dict:
                 if not code.strip():
                     continue
                 result = await orchestrate_async(code)
+                # orchestrate_async returns AnalysisReport.dict(), so
+                # static_findings holds plain dicts, not Pydantic models.
+                # Attribute access here raised AttributeError on every row.
+                findings = result.get("static_findings") or []
+                llm = result.get("llm_result")
                 results.append({
                     "sample_index": i,
                     "code_preview": code[:80] + "..." if len(code) > 80 else code,
-                    "total_issues": result["total_issues"],
-                    "rule_tags": [f.rule_id for f in result["static_findings"]] if "static_findings" in result else [],
-                    "llm_valid_bug": result["llm_result"]["valid_bug"] if result["llm_result"] else None,
-                    "llm_confidence": result["llm_result"]["confidence"] if result["llm_result"] else None,
+                    "total_issues": result.get("total_issues", 0),
+                    "rule_tags": [
+                        f.get("rule_tag") or f.get("rule_id") or "unknown"
+                        for f in findings
+                    ],
+                    "llm_valid_bug": llm.get("valid_bug") if llm else None,
+                    "llm_confidence": llm.get("confidence") if llm else None,
                 })
     except Exception as e:
         return {"error": str(e)}

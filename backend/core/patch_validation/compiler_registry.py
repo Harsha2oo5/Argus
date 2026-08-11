@@ -11,6 +11,20 @@ class CompilerRegistry:
     }
 
     @classmethod
+    def register(cls, name: str, compiler_class) -> None:
+        """
+        Register a compiler backend.
+
+            CompilerRegistry.register("intel", IntelCompiler)
+        """
+        cls._compilers[name.lower()] = compiler_class
+
+    @classmethod
+    def available(cls) -> list:
+        """Return every registered compiler name."""
+        return sorted(cls._compilers)
+
+    @classmethod
     def get_compiler(cls, name: str) -> BaseCompiler:
         """
         Get compiler instance by name. Defaults to GCC compiler.

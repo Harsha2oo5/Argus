@@ -532,13 +532,28 @@ class TestPromptBuilder(unittest.TestCase):
         )
         from backend.core.patch_generation.prompt_builder import PatchPromptBuilder
         from backend.core.patch_generation.exceptions import PromptOverflowError
-        tiny_config  = PatchGenerationConfig(max_tokens=128)
+        # The prompt is measured against the *input* budget.
+        tiny_config  = PatchGenerationConfig(max_prompt_tokens=512)
         tiny_builder = PatchPromptBuilder(tiny_config)
         with self.assertRaises(PromptOverflowError):
             tiny_builder.build_user_prompt(
                 self.finding, self.rc, self.ctx, self.plan,
                 RepairCategory.NULL_POINTER_CHECK,
             )
+
+    def test_small_output_budget_does_not_trigger_prompt_overflow(self):
+        """max_tokens bounds the completion, not the prompt we send."""
+        from backend.core.patch_generation.patch_models import (
+            PatchGenerationConfig, RepairCategory
+        )
+        from backend.core.patch_generation.prompt_builder import PatchPromptBuilder
+        cfg     = PatchGenerationConfig(max_tokens=128, max_prompt_tokens=12000)
+        builder = PatchPromptBuilder(cfg)
+        prompt  = builder.build_user_prompt(
+            self.finding, self.rc, self.ctx, self.plan,
+            RepairCategory.NULL_POINTER_CHECK,
+        )
+        self.assertIn("BUG REPORT", prompt)
 
     def test_candidate_count_in_output_schema(self):
         from backend.core.patch_generation.patch_models import (
@@ -1063,7 +1078,7 @@ class TestPatchGenerationEngine(unittest.TestCase):
         self.rc       = _make_root_cause()
 
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        return asyncio.run(coro)
 
     def test_full_pipeline_returns_structured_patch(self):
         patch = self._run(self.engine.generate(

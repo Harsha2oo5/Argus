@@ -7,6 +7,14 @@ logger = logging.getLogger("backend.patch_validation.quality_metrics")
 class QualityMetricsCalculator:
     """Computes multidimensional validation scores and code quality metrics."""
 
+    # Nominal dimension weights. They intentionally sum to 0.8 rather than
+    # 1.0: a perfect patch scores 0.8 against a default acceptance threshold
+    # of 0.7, leaving headroom for the penalty deductions below.
+    _W_BUG_REMOVAL = 0.4
+    _W_REGRESSION  = 0.3
+    _W_SIMPLICITY  = 0.1
+    _NOMINAL_TOTAL = _W_BUG_REMOVAL + _W_REGRESSION + _W_SIMPLICITY
+
     def compute_metrics(
         self,
         compilation_success: bool,
@@ -18,9 +26,25 @@ class QualityMetricsCalculator:
         lines_changed: int,
         patch_size: int,
         duration_ms: float,
+        *,
+        static_evaluated: bool = True,
+        regression_evaluated: bool = True,
     ) -> ValidationMetrics:
         """
         Evaluate metrics and calculate an overall quality score.
+
+        Parameters
+        ----------
+        static_evaluated : False when static reanalysis was disabled or did
+            not run, so ``bug_removed`` carries no information.
+        regression_evaluated : False when regression testing was disabled or
+            did not run, so ``regression_success`` carries no information.
+
+        A dimension that was never evaluated is *excluded* from the score and
+        the remaining weights are rescaled to the same nominal total. Counting
+        an unevaluated dimension as a failure (the previous behaviour) capped
+        the score below the default 0.7 acceptance threshold, so no candidate
+        could ever be accepted with regression testing turned off.
 
         Returns
         -------
@@ -30,30 +54,33 @@ class QualityMetricsCalculator:
         if not compilation_success or not syntax_success:
             score = 0.0
         else:
-            score = 0.0
-
-            # 1. Bug removal (Weight: 0.4)
-            if bug_removed:
-                score += 0.4
-
-            # 2. Regression verification (Weight: 0.3)
-            if regression_success:
-                score += 0.3
-
-            # 3. Patch simplicity bonus (Weight: 0.1)
-            # Penalise excessively large patches; ideal patch touches few lines
-            simplicity_bonus = 0.1
+            # Patch simplicity: penalise excessively large patches;
+            # the ideal patch touches few lines.
             if lines_changed > 50:
-                simplicity_bonus = 0.02
+                simplicity_raw = 0.2
             elif lines_changed > 20:
-                simplicity_bonus = 0.05
+                simplicity_raw = 0.5
             elif lines_changed > 10:
-                simplicity_bonus = 0.08
+                simplicity_raw = 0.8
+            else:
+                simplicity_raw = 1.0
 
-            score += simplicity_bonus
+            # (weight, achieved_fraction) for every dimension that was
+            # actually measured.
+            dimensions = [(self._W_SIMPLICITY, simplicity_raw)]
+            if static_evaluated:
+                dimensions.append((self._W_BUG_REMOVAL, 1.0 if bug_removed else 0.0))
+            if regression_evaluated:
+                dimensions.append((self._W_REGRESSION, 1.0 if regression_success else 0.0))
 
-            # 4. Code regressions penalties (Deductions)
-            # New bugs introduced are highly penalized
+            available_weight = sum(w for w, _ in dimensions)
+            earned = sum(w * v for w, v in dimensions)
+            # Rescale so the achievable maximum is always _NOMINAL_TOTAL,
+            # whichever dimensions were measured.
+            score = earned * (self._NOMINAL_TOTAL / available_weight)
+
+            # Code regression penalties (deductions).
+            # New bugs introduced are heavily penalised.
             if new_bug_count > 0:
                 score -= min(0.4, 0.15 * new_bug_count)
 

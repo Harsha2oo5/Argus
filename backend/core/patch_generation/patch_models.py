@@ -119,6 +119,10 @@ class PatchGenerationConfig(BaseModel):
                                    description="Nucleus sampling top-p.")
     max_tokens:      int   = Field(default=4096, ge=128,
                                    description="Maximum output tokens per completion.")
+    max_prompt_tokens: int = Field(default=12000, ge=512,
+                                   description="Maximum *input* tokens for the assembled prompt. "
+                                               "Distinct from max_tokens, which bounds the "
+                                               "completion the model writes back.")
 
     # Candidate generation
     candidate_count: int   = Field(default=3, ge=1, le=5,

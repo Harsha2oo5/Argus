@@ -46,6 +46,7 @@ from backend.core.patch_generation.patch_models import (
     PatchCandidate,
     StructuredPatch,
 )
+from backend.core.patch_validation.configuration import PatchValidationConfig
 from backend.core.patch_validation.validation_engine import ValidationEngine
 from backend.core.patch_validation.validation_models import ValidationReport
 
@@ -66,6 +67,7 @@ class RepairLoop:
         memory: RepairMemory,
         audit_trail: AuditTrail,
         metrics_collector: RepairMetricsCollector,
+        validation_config: Optional[PatchValidationConfig] = None,
     ) -> None:
         self._provider = provider
         self._cfg = config
@@ -83,7 +85,12 @@ class RepairLoop:
         self._scorer = RepairScorer(config)
         self._convergence_detector = ConvergenceDetector(config)
         self._termination_policy = TerminationPolicy(config)
-        self._validation_engine = ValidationEngine()  # Reuse Phase 3D.2 Validation Engine
+        # Reuse the Phase 3D.2 validation engine. The config must be
+        # injectable: hard-coding the defaults pinned every repair session to
+        # cmake + gcc + regression testing, so on any project with a different
+        # toolchain the build step failed and no candidate could ever score
+        # above the acceptance threshold.
+        self._validation_engine = ValidationEngine(validation_config)
 
     async def execute_loop(
         self,
@@ -125,10 +132,20 @@ class RepairLoop:
                     try:
                         self._metrics.record_agent_invocation()
                         planner_agent = self._agents.get_agent(AgentRole.PLANNER)
+                        # PlannerAgent reads the peer agents' decisions from
+                        # its context; they live on the previous iteration's
+                        # record. Omitting them left the planner prompt
+                        # missing half its documented inputs.
+                        prev_decisions = latest_iter.agent_decisions if latest_iter else {}
                         planner_ctx = {
                             "feedback": last_feedback,
+                            "validator_decision": prev_decisions.get("validator"),
+                            "reviewer_decision":  prev_decisions.get("reviewer"),
+                            "reasoning_decision": prev_decisions.get("reasoning"),
                             "score_progression": self._pool.score_progression(),
-                            "strategies_tried": list(self._memory.get_strategies_tried()),
+                            "strategies_tried": [
+                                s.value for s in self._memory.get_strategies_tried()
+                            ],
                             "memory_summary": self._memory.summarize(),
                             "iteration": iteration_index,
                             "max_iterations": self._cfg.max_iterations,
@@ -250,10 +267,53 @@ class RepairLoop:
                         except Exception as e:
                             logger.error("Refinement failed: %s", e)
 
-            # If we failed to produce candidates, increment failures and terminate/continue
+            # If we failed to produce candidates, record the failure and still
+            # evaluate the stop conditions. Skipping straight to the next
+            # iteration bypassed the termination policy entirely, so a
+            # persistently failing generator (no API key, retired model,
+            # provider outage) span forever -- the wall-clock timeout lives
+            # inside that same check and was skipped along with it.
             if not current_patches or not current_patches.file_patches or not current_patches.file_patches[0].candidates:
                 logger.warning("No candidate patch produced in iteration %d", iteration_index)
                 consecutive_failures += 1
+
+                term_reason = self._termination_policy.should_terminate(
+                    iteration_index=iteration_index,
+                    accepted=accepted_winner,
+                    consecutive_failures=consecutive_failures,
+                    score_converged=False,
+                    candidate_pool_size=self._pool.size,
+                )
+                iter_duration = (time.perf_counter() - t_iter_start) * 1000
+                self._memory.add_iteration(RepairIteration(
+                    iteration_index=iteration_index,
+                    strategy=strategy,
+                    refinement_strategy=refinement_strat,
+                    improved=False,
+                    terminated=(term_reason is not None),
+                    termination_reason=term_reason,
+                    duration_ms=iter_duration,
+                    completed_at=time.time(),
+                ))
+                self._metrics.record_iteration_end(
+                    iteration_index=iteration_index,
+                    duration_ms=iter_duration,
+                    best_score=0.0,
+                    improved=False,
+                    strategy=strategy,
+                )
+                self._audit.log(
+                    AuditEventType.ITERATION_END,
+                    {
+                        "iteration": iteration_index,
+                        "duration_ms": iter_duration,
+                        "improved": False,
+                        "no_candidates": True,
+                    },
+                    iteration=iteration_index,
+                )
+                if term_reason is not None:
+                    break
                 iteration_index += 1
                 continue
 

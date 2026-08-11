@@ -13,11 +13,14 @@ class ReportGeneratorAgent(BaseAgent):
         correction: Optional[CodeCorrection],
         combined_confidence: float
     ) -> dict:
+        # NormalizedFinding serialises the identifier as `rule_id`; the client
+        # contract (FindingDetail / the UI) calls the same value `rule_tag`.
+        # Reading only `rule_tag` here made every finding render as "unknown".
         static_details = [
             FindingDetail(
                 line_number=f.get("line_number"),
                 line_text=f.get("line_text", ""),
-                rule_tag=f.get("rule_tag", "unknown"),
+                rule_tag=f.get("rule_id") or f.get("rule_tag") or "unknown",
                 description=f.get("description", ""),
                 confidence=f.get("static_confidence", 0.5),
                 source="static"
@@ -41,4 +44,4 @@ class ReportGeneratorAgent(BaseAgent):
             llm_available=llm_result_dict is not None
         )
 
-        return report.dict()
+        return report.model_dump()

@@ -50,14 +50,37 @@ class SyntaxValidator:
         success = len(errors) == 0
         return success, errors
 
+    # Comments and string/char literals, in one pass so a "//" inside a string
+    # is not mistaken for a comment.
+    _MASK_RE = re.compile(
+        r'/\*.*?\*/'                 # block comment
+        r'|//[^\n]*'                 # line comment
+        r'|"(?:\\.|[^"\\\n])*"'      # double-quoted string
+        r"|'(?:\\.|[^'\\\n])*'",     # single-quoted char
+        re.DOTALL,
+    )
+
+    @staticmethod
+    def _blank_out(match: re.Match) -> str:
+        """
+        Replace a matched region with an equal-length run of spaces, keeping
+        newlines so both character offsets and line numbers stay aligned.
+        """
+        text = match.group(0)
+        return "".join("\n" if ch == "\n" else " " for ch in text)
+
     def _clean_code(self, code: str) -> str:
-        # Regex to strip single-line and multi-line comments
-        no_comments = re.sub(r'(/\*([^*]|(\*+[^*/]))*\*+/)|(//.*)', '', code)
-        
-        # Strip string and character literals
-        # Match double quoted string or single quoted char
-        no_strings = re.sub(r'("(?:\\.|[^"\\])*")|(\'(?:\\.|[^\'\\])*\')', '""', no_comments)
-        return no_strings
+        """
+        Mask comments and literals *in place*.
+
+        The result is the same length as the input, character for character.
+        The previous implementation deleted the matched regions, so every
+        index into the cleaned string pointed at a different character in the
+        original -- and the reported line numbers, which are looked up against
+        the original text, were wrong for any file containing a comment or a
+        string literal.
+        """
+        return self._MASK_RE.sub(self._blank_out, code)
 
     def _get_line_numbers_mapping(self, code: str) -> List[int]:
         mapping = []

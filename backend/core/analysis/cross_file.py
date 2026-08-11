@@ -52,6 +52,11 @@ class CrossFileReasoner:
 
     def __init__(self, max_depth: int = 5):
         self._hopper = MultiHopReasoner(max_depth=max_depth)
+        # Cycle detection walks the entire graph, but the graph only changes
+        # when a symbol or edge is added. During a repository scan the same
+        # graph is traced once per finding, so memoising on the graph version
+        # turns O(findings x graph) back into O(graph) per mutation.
+        self._cycle_cache: Optional[tuple] = None      # (version, [CycleRecord])
 
     # ------------------------------------------------------------------
     # Public API
@@ -95,9 +100,15 @@ class CrossFileReasoner:
             result.unresolved.append(start)
             return result
 
-        # Detect cycles first
-        raw_cycles = self._hopper.detect_cycles(adjacency)
-        result.cycles = [CycleRecord(nodes=c) for c in raw_cycles]
+        # Detect cycles first (memoised on the graph's mutation counter)
+        version = getattr(graph, "version", None)
+        if version is not None and self._cycle_cache and self._cycle_cache[0] == version:
+            result.cycles = self._cycle_cache[1]
+        else:
+            raw_cycles = self._hopper.detect_cycles(adjacency)
+            result.cycles = [CycleRecord(nodes=c) for c in raw_cycles]
+            if version is not None:
+                self._cycle_cache = (version, result.cycles)
 
         # Trace paths
         paths = self._hopper.trace(adjacency, start=start, max_depth=max_depth)

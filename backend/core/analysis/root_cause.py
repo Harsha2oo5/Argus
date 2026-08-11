@@ -123,12 +123,9 @@ class RootCauseAnalyzer:
 
         # --- H3: IPA backward traversal — calling site -------------------
         if call_graph and finding.file_path:
-            # Find symbols defined in the finding file
-            file_symbols = {
-                s.name for s in graph.symbols.values()
-                if s.file_path == finding.file_path
-            }
-            for sym in file_symbols:
+            # Symbols defined in the finding's file, via the by-file index.
+            file_symbols = graph.symbol_names_in_file(finding.file_path)
+            for sym in sorted(file_symbols):
                 callers = graph.get_callers(sym)
                 for caller in callers[:3]:  # cap at 3 callers to avoid explosion
                     conf = h1_conf * 0.70

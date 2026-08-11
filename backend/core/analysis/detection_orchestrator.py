@@ -48,9 +48,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+import re
+
 from backend.core.analysis.engine import AnalysisEngine, EnrichedFinding
 from backend.core.analysis.schemas import NormalizedFinding, AnalysisReport
-from backend.core.analysis.repo_graph import RepositoryKnowledgeGraph
+from backend.core.analysis.repo_graph import RepositoryKnowledgeGraph, SymbolNode
+from backend.core.analysis.dfg import DFGConstructor, DataDependency
+from backend.core.analysis.ipa import IPATracer, InterproceduralCallGraph
 from backend.core.analysis.localizer import BugLocalizer, CodeSpan
 from backend.core.analysis.cross_file import CrossFileReasoner
 from backend.core.analysis.root_cause import RootCauseAnalyzer, RootCauseChain
@@ -72,6 +76,9 @@ except ImportError:  # pragma: no cover
 
 logger = logging.getLogger("backend.analysis.detection_orchestrator")
 
+# Wall-clock cap for one off-thread patch generation call.
+_PATCH_GENERATION_TIMEOUT_S = 60
+
 
 # ---------------------------------------------------------------------------
 # Per-finding full analysis record
@@ -86,6 +93,8 @@ class FindingAnalysis:
     patch_plan:     PatchPlan
     remediation:    RemediationPlan
     regression:     RegressionImpactReport
+    # Cross-module trace seeded from the finding's file / enclosing symbol
+    cross_file:     Optional[Any] = None    # CrossFileTrace | None
     # Phase 3D.1 — populated when a PatchGenerationEngine is configured
     structured_patch: Optional[Any] = None  # StructuredPatch | None
 
@@ -156,6 +165,7 @@ class DetectionOrchestrator:
         code:      str,
         extension: str = "cpp",
         file_path: Optional[str] = None,
+        render_reports: bool = True,
     ) -> OrchestratorResult:
         """
         Execute the full Phase 3C.2 + 3D.1 pipeline and return an OrchestratorResult.
@@ -170,14 +180,28 @@ class DetectionOrchestrator:
         logger.info("DetectionOrchestrator.run() started (extension=%s).", extension)
 
         # ── 1. Static + Phase 3C.2 core pipeline ──────────────────────
-        enriched_findings = self._engine.analyze(code, extension)
+        enriched_findings = self._engine.analyze(code, extension, file_path)
         suppressed_count  = len(self._engine._suppression_p.audit_log)
+
+        # ── 1b. Program graphs (Phase 3A) ─────────────────────────────
+        # Built once per run and shared by every finding. Without these the
+        # RootCauseAnalyzer can only ever emit its trivial H1 hypothesis.
+        dfg_deps: List[DataDependency] = DFGConstructor().construct(
+            code.splitlines()
+        ).dependencies
+        call_graph: InterproceduralCallGraph = IPATracer().trace_calls(code)
+        self._seed_repo_graph(code, call_graph, file_path)
 
         # ── 2. Per-finding deep analysis ───────────────────────────────
         analyses: List[FindingAnalysis] = []
 
         for ef in enriched_findings:
-            fa = self._analyse_finding(ef, source_code=code)
+            fa = self._analyse_finding(
+                ef,
+                source_code=code,
+                dfg_deps=dfg_deps,
+                call_graph=call_graph,
+            )
             analyses.append(fa)
 
         # ── 3. Build plain NormalizedFinding list for AnalysisReport ──
@@ -222,10 +246,15 @@ class DetectionOrchestrator:
             structured_patches=structured_patches,
         )
 
-        json_bytes     = self._reporter.generate(enriched_report, ReportFormat.JSON)
-        sarif_bytes    = self._reporter.generate(enriched_report, ReportFormat.SARIF)
-        markdown_bytes = self._reporter.generate(enriched_report, ReportFormat.MARKDOWN)
-        html_bytes     = self._reporter.generate(enriched_report, ReportFormat.HTML)
+        # A repository scan aggregates its own report across all files and
+        # discards these, so rendering four formats per file is pure waste.
+        if render_reports:
+            json_bytes     = self._reporter.generate(enriched_report, ReportFormat.JSON)
+            sarif_bytes    = self._reporter.generate(enriched_report, ReportFormat.SARIF)
+            markdown_bytes = self._reporter.generate(enriched_report, ReportFormat.MARKDOWN)
+            html_bytes     = self._reporter.generate(enriched_report, ReportFormat.HTML)
+        else:
+            json_bytes = sarif_bytes = markdown_bytes = html_bytes = b""
 
         duration = time.perf_counter() - t0
         logger.info(
@@ -255,19 +284,34 @@ class DetectionOrchestrator:
         self,
         ef:          EnrichedFinding,
         source_code: str = "",
+        dfg_deps:    Optional[List[DataDependency]] = None,
+        call_graph:  Optional[InterproceduralCallGraph] = None,
     ) -> FindingAnalysis:
         """
         Run per-finding deep analysis:
-        localize → root cause → patch plan → remediate → regression →
-        [optional] patch generation (Phase 3D.1).
+        localize → cross-file trace → root cause → patch plan → remediate →
+        regression → [optional] patch generation (Phase 3D.1).
         """
         f = ef.finding
 
         # Localization
         spans = self._localizer.locate(f, self._graph)
 
-        # Root cause
-        rc = self._root_cause.analyze(f, self._graph)
+        # Cross-file trace, seeded from the enclosing symbol when the localizer
+        # resolved one, otherwise from the file itself.
+        cross_trace = None
+        seed = next((s.symbol_name for s in spans if s.symbol_name), None) or f.file_path
+        if seed:
+            try:
+                cross_trace = self._cross_file.trace(self._graph, seed)
+            except Exception as exc:
+                logger.debug("CrossFileReasoner trace failed for '%s': %s", seed, exc)
+
+        # Root cause — DFG slice (H2) and IPA caller traversal (H3) only fire
+        # when the program graphs are supplied.
+        rc = self._root_cause.analyze(
+            f, self._graph, dfg_deps=dfg_deps, call_graph=call_graph
+        )
 
         # Patch plan
         pp = self._patcher.plan(f, rc, self._graph, spans)
@@ -289,46 +333,35 @@ class DetectionOrchestrator:
         # ── Phase 3D.1: autonomous patch generation (optional) ────────
         structured_patch: Optional[Any] = None
         if self._patch_engine is not None and source_code:
+            # generate() is async but run() is a synchronous façade, so the
+            # coroutine has to be driven differently depending on whether a
+            # loop is already running in this thread (e.g. under FastAPI).
+            # The coroutine is built lazily by this factory so exactly one is
+            # ever created -- constructing it up-front on a branch that is not
+            # taken leaves an un-awaited coroutine behind.
+            def _new_coro():
+                return self._patch_engine.generate(
+                    finding    = f,
+                    code       = source_code,
+                    root_cause = rc,
+                    evidence   = getattr(ef, "evidence_graph", None),
+                    bug_id     = f.rule_id,
+                )
+
             try:
-                # Run the async generate() in the current event loop, or
-                # create a new one if we are in a synchronous context.
                 try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        # In an already-running loop (e.g. FastAPI)
-                        import concurrent.futures
-                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                            future = ex.submit(
-                                asyncio.run,
-                                self._patch_engine.generate(
-                                    finding    = f,
-                                    code       = source_code,
-                                    root_cause = rc,
-                                    evidence   = ef.evidence_graph if hasattr(ef, 'evidence_graph') else None,
-                                    bug_id     = f.rule_id,
-                                )
-                            )
-                            structured_patch = future.result(timeout=60)
-                    else:
-                        structured_patch = loop.run_until_complete(
-                            self._patch_engine.generate(
-                                finding    = f,
-                                code       = source_code,
-                                root_cause = rc,
-                                evidence   = ef.evidence_graph if hasattr(ef, 'evidence_graph') else None,
-                                bug_id     = f.rule_id,
-                            )
-                        )
+                    asyncio.get_running_loop()
                 except RuntimeError:
-                    structured_patch = asyncio.run(
-                        self._patch_engine.generate(
-                            finding    = f,
-                            code       = source_code,
-                            root_cause = rc,
-                            evidence   = ef.evidence_graph if hasattr(ef, 'evidence_graph') else None,
-                            bug_id     = f.rule_id,
-                        )
-                    )
+                    # No loop running in this thread — drive it directly.
+                    structured_patch = asyncio.run(_new_coro())
+                else:
+                    # A loop owns this thread; asyncio.run() would raise.
+                    # Hand the work to a worker thread with its own loop.
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                        structured_patch = ex.submit(
+                            lambda: asyncio.run(_new_coro())
+                        ).result(timeout=_PATCH_GENERATION_TIMEOUT_S)
             except Exception as patch_err:
                 logger.warning(
                     "DetectionOrchestrator: patch generation failed for '%s': %s — "
@@ -339,5 +372,51 @@ class DetectionOrchestrator:
         return FindingAnalysis(
             enriched=ef, spans=spans, root_cause=rc,
             patch_plan=pp, remediation=rp, regression=reg,
+            cross_file=cross_trace,
             structured_patch=structured_patch,
+        )
+
+    # ------------------------------------------------------------------
+    # Repository graph seeding
+    # ------------------------------------------------------------------
+
+    # Matches a C/C++ function definition opening brace, e.g. "void foo(int a) {"
+    _FUNC_DECL_RE = re.compile(r'^\s*[\w:*&<>\s]+?\b(\w+)\s*\([^;]*\)\s*(?:const\s*)?\{')
+
+    def _seed_repo_graph(
+        self,
+        code:       str,
+        call_graph: InterproceduralCallGraph,
+        file_path:  Optional[str],
+    ) -> None:
+        """
+        Populate the RepositoryKnowledgeGraph from the analysed file.
+
+        Single-file callers pass no pre-built graph, which previously left the
+        localizer, root-cause H3, patch strategy S3, and regression analysis
+        with nothing to traverse. Registering the functions and call edges we
+        already parsed makes those subsystems operate on real data.
+
+        Idempotent: symbols are keyed by name and call edges are stored in
+        sets, so re-seeding across runs does not duplicate anything.
+        """
+        resolved_path = file_path or "<in-memory>"
+
+        for i, line in enumerate(code.splitlines(), start=1):
+            m = self._FUNC_DECL_RE.match(line)
+            if m:
+                self._graph.register_symbol(SymbolNode(
+                    name=m.group(1),
+                    symbol_type="function",
+                    file_path=resolved_path,
+                    line_number=i,
+                ))
+
+        for edge in call_graph.edges:
+            if edge.caller != "global":
+                self._graph.add_call(edge.caller, edge.callee)
+
+        logger.debug(
+            "DetectionOrchestrator: repo graph seeded — %d symbol(s), %d caller(s).",
+            len(self._graph.symbols), len(self._graph.call_graph),
         )

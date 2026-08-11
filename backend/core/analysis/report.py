@@ -259,6 +259,13 @@ class ReportGenerator:
                     best_fp.candidates[best_fp.best_candidate_index]
                     if best_fp and best_fp.candidates else None
                 )
+                # NB: the conditional below must stay wrapped in its own
+                # expression. Written inline as
+                #     f"| Best confidence | " f"{x:.2f}" if best_cand else "n/a"
+                # the ternary binds to the *whole* concatenation, so a missing
+                # candidate replaced the entire table row with a bare "n/a"
+                # and a present one produced a row with no closing pipe.
+                best_conf = f"{best_cand.confidence:.2f}" if best_cand else "n/a"
                 lines.extend([
                     f"### 🔧 Autonomous Patch  `{patch.patch_id[:8]}`",
                     f"",
@@ -266,8 +273,7 @@ class ReportGenerator:
                     f"|----------|-------|",
                     f"| Repair category | `{patch.repair_category.value}` |",
                     f"| Candidates | {len(best_fp.candidates) if best_fp else 0} |",
-                    f"| Best confidence | "
-                    f"{best_cand.confidence:.2f}" if best_cand else "n/a",
+                    f"| Best confidence | {best_conf} |",
                     f"| Provider | `{patch.generation_metadata.provider}` |",
                     f"| Generation time | {patch.generation_metadata.generation_time_ms:.0f} ms |",
                     f"",

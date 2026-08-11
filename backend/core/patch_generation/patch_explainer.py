@@ -7,26 +7,26 @@ justification alongside the diff.
 
 Explanation sources
 -------------------
-1. **LLM-provided reasoning** — If the candidate already has an
+1. **LLM-provided reasoning** — If the candidate already has a complete
    ``explanation`` field populated by the parser (from the model's JSON
-   output), it is used directly.
+   output), it is used as-is.
 
-2. **LLM-supplemented explanation** — If the candidate has partial
-   explanation data, the engine enriches missing fields via a follow-up
-   LLM call (optional; requires ``provider``).
-
-3. **Rule-based fallback** — When no LLM provider is available or the
-   provider call fails, the engine synthesises an explanation from the
-   repair guidance, root cause chain, and candidate metadata.
+2. **Rule-based synthesis** — Otherwise the engine composes the explanation
+   from the repair guidance, root cause chain, and candidate metadata,
+   filling in any field the model left blank.
 
 Design invariants
 -----------------
-- The fallback path ALWAYS produces a valid ``PatchExplanation``; the
+- This engine performs NO additional LLM calls. Patch generation already
+  asks the model for a full explanation as part of its output schema, so a
+  follow-up round-trip per candidate would add latency and cost for fields
+  that can be derived deterministically.
+- The synthesis path ALWAYS produces a valid ``PatchExplanation``; the
   engine NEVER returns None.
-- Provider calls are optional; passing ``provider=None`` always uses
-  the rule-based path.
 - Explanations are generated per-candidate independently so failures
   on one candidate do not affect others.
+- ``provider`` is accepted for interface symmetry with the other pipeline
+  components and is reserved for future use; it is not called today.
 """
 from __future__ import annotations
 
@@ -54,9 +54,10 @@ class PatchExplainerEngine:
 
     Parameters
     ----------
-    config   : Engine configuration (for provider settings).
-    registry : Repair guidance registry (for rule-based fallback).
-    provider : Optional LLM provider for supplementary explanations.
+    config   : Engine configuration.
+    registry : Repair guidance registry used for rule-based synthesis.
+    provider : Reserved for future use. Accepted for interface symmetry with
+               the other pipeline components; this engine makes no LLM calls.
     """
 
     def __init__(

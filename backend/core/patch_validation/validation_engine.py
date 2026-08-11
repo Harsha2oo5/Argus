@@ -62,10 +62,22 @@ class ValidationEngine:
 
         # Standardize finding dictionary for static reanalysis comparison
         if not original_finding:
+            # line_text lets StaticValidator identify the exact flagged
+            # statement instead of guessing by line proximity. The first
+            # candidate's original_code is the block the patch replaces, so
+            # its first non-empty line is the flagged statement.
+            flagged_text = ""
+            if file_patch.candidates:
+                for raw_line in file_patch.candidates[0].original_code.splitlines():
+                    if raw_line.strip():
+                        flagged_text = raw_line.strip()
+                        break
+
             original_finding = {
                 "rule_id": patch.rule_id,
                 "file_path": file_path,
                 "line_number": file_patch.start_line or 1,
+                "line_text": flagged_text,
                 "severity": file_patch.severity,
                 "static_confidence": file_patch.confidence,
                 "description": patch.root_cause or "Repair patch verification",

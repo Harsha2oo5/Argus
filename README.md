@@ -119,13 +119,13 @@ Engineering Reports       JSON / SARIF 2.1.0 / Markdown / HTML / RepairReport
 
 ### Phase 3D.2 — Autonomous Patch Validation
 - `ValidationEngine`: top-level orchestrator running the full validation pipeline across all candidates and returning a `ValidationReport`
-- `WorkspaceManager`: context-managed isolated directory creation using `tempfile`; supports `temp_dir`, `git_worktree`, and `none` modes; original repository is never modified
+- `WorkspaceManager`: context-managed isolated directory creation using `tempfile`; supports `temp_dir`, `git_worktree`, and `none` modes; the original repository is never modified except in `none` mode, which validates in place by design. Note that `git_worktree` currently falls back to the same copy-based isolation as `temp_dir` rather than creating a real worktree
 - `PatchApplier`: unified diff parser with hunk offset tolerance (±30 lines) and block-replace fallback for partial-match diffs
 - `SyntaxValidator`: pre-compilation structural check for balanced braces, parentheses, brackets, and preprocessor directive syntax
 - Compiler abstraction: `BaseCompiler` ABC with `GCCCompiler`, `ClangCompiler`, and `MSVCCompiler` async subprocess runners capturing stdout, stderr, warnings, errors, and timing
 - `CompilerRegistry`: string-based compiler resolver with extensible registration
 - Build system abstraction: `CMakeBuildSystem`, `MakeBuildSystem`, `NinjaBuildSystem`, `BazelBuildSystem`, `NoneBuildSystem`, and `BuildSystemRegistry`
-- `StaticValidator`: re-runs `AnalysisEngine` on the patched file and compares findings to confirm bug removal and detect newly introduced violations
+- `StaticValidator`: re-runs `AnalysisEngine` on the patched file and compares findings to confirm bug removal and detect newly introduced violations. Bug removal requires two independent signals — the flagged statement's signature must be gone *and* the per-rule occurrence count must drop — so neither a cosmetic edit nor an unrelated same-rule hit nearby can be mistaken for a fix
 - `TestDiscovery`: scans for CTest configurations, shell/Python test scripts, and test binaries (GoogleTest, Catch2)
 - `RegressionRunner`: async subprocess test runner with output parsers for CTest, GoogleTest, Catch2, and binary exit codes
 - `QualityMetrics`: weighted scoring across bug removal (0.4), regression pass (0.3), simplicity (0.1), minus penalties for new bugs and warning increases
@@ -163,7 +163,7 @@ argus/
 │   │   │   ├── parsers/                  # Language frontend and UIR
 │   │   │   │   ├── base.py               # CodeRepresentation IR contract
 │   │   │   │   ├── registry.py           # ParserRegistry
-│   │   │   │   ├── cpp_parser.py         # C++ tokenizer and IR builder
+│   │   │   │   ├── cpp.py                # C++ line scanner and IR builder
 │   │   │   │   └── uir.py                # Unified Intermediate Representation nodes
 │   │   │   ├── rules/                    # Pluggable rule engine
 │   │   │   │   ├── base.py               # BaseRule abstract class
@@ -172,6 +172,7 @@ argus/
 │   │   │   ├── schemas.py                # NormalizedFinding + AnalysisReport (Pydantic)
 │   │   │   ├── engine.py                 # AnalysisEngine — full Phase 3C.2 pipeline
 │   │   │   ├── detection_orchestrator.py # DetectionOrchestrator — end-to-end facade
+│   │   │   ├── repository_scanner.py     # RepositoryScanner — whole-repo traversal
 │   │   │   ├── graph.py                  # DAG ExecutionGraph scheduler
 │   │   │   ├── state.py                  # StateManager — checkpoint persistence
 │   │   │   ├── repo_graph.py             # RepositoryKnowledgeGraph
@@ -221,7 +222,6 @@ argus/
 │   │   │   ├── diff_generator.py         # Unified diff generation
 │   │   │   ├── syntax_preserver.py       # Style detection and violation reporting
 │   │   │   ├── repair_strategies.py      # RepairGuidanceRegistry (20 categories)
-│   │   │   ├── candidate_ranker.py       # Confidence-based candidate ranking
 │   │   │   ├── exceptions.py             # Generation exception hierarchy
 │   │   │   └── __init__.py               # Package exports
 │   │   ├── patch_validation/             # Phase 3D.2 — Autonomous Patch Validation
@@ -280,13 +280,17 @@ argus/
 │   │   ├── config.py                     # Settings loader
 │   │   └── orchestrator.py              # Legacy pipeline orchestrator
 │   ├── api/
-│   │   └── router.py                     # FastAPI HTTP routes
+│   │   ├── router.py                     # Core HTTP routes
+│   │   └── repository.py                 # Repository scan / upload / export routes
 │   ├── tests/
 │   │   ├── test_static_engine.py         # Static engine regression suite
-│   │   ├── test_patch_generation.py      # Phase 3D.1 unit tests (104 tests)
-│   │   ├── test_patch_validation.py      # Phase 3D.2 unit tests (19 tests)
-│   │   ├── test_groq_provider.py         # LLM fallback unit tests (4 tests)
-│   │   └── test_autonomous_repair.py     # Phase 3D.3 Multi-Agent Loop tests (~120 tests)
+│   │   ├── test_analysis_pipeline.py     # Phases 3A / 3C.2 pipeline and graph builders
+│   │   ├── test_patch_generation.py      # Phase 3D.1 unit tests
+│   │   ├── test_patch_validation.py      # Phase 3D.2 unit tests
+│   │   ├── test_autonomous_repair.py     # Phase 3D.3 multi-agent loop tests
+│   │   ├── test_api_contract.py          # Cross-subsystem seams and model routing
+│   │   ├── test_integration_e2e.py       # detect → generate → validate, real toolchain
+│   │   └── test_groq_provider.py         # LLM fallback unit tests
 │   ├── main.py                           # FastAPI application entry point
 │   ├── mcp_server.py                     # FastMCP server CLI entry point
 │   ├── requirements.txt
@@ -344,6 +348,23 @@ python main.py
 
 API available at `http://localhost:8000`
 
+#### Model configuration
+
+Groq retires hosted models on a rolling basis, and a decommissioned ID fails
+every request in the fallback chain — which silently disables every LLM
+feature. All model IDs are therefore environment-overridable, so a retirement
+can be worked around without a code change:
+
+| Variable | Default | Used for |
+|---|---|---|
+| `GROQ_MODEL` | `llama-3.1-8b-instant` | Classification, static-finding validation |
+| `GROQ_REASONING_MODEL` | `llama-3.3-70b-versatile` | Patch generation, refinement, failure reasoning |
+| `GROQ_FALLBACK_MODELS` | `llama-3.3-70b-versatile,llama-3.1-8b-instant` | Comma-separated chain tried on failure |
+
+Check [console.groq.com/docs/models](https://console.groq.com/docs/models) for
+the current roster. `ModelRoutingEngine` reads these settings, so there is a
+single place to update.
+
 ### Frontend
 
 ```bash
@@ -373,21 +394,28 @@ python -m unittest discover -s tests
 Expected output:
 
 ```
-Ran 252 tests in ~2.5s
+Ran 272 tests in ~5s
 
 OK
 ```
 
 Test breakdown:
 
-| Suite | Tests |
-|---|---|
-| `test_static_engine.py` | 5 |
-| `test_patch_generation.py` | 104 |
-| `test_patch_validation.py` | 19 |
-| `test_groq_provider.py` | 4 |
-| `test_autonomous_repair.py` | 120 |
-| **Total** | **252** |
+| Suite | Tests | Covers |
+|---|---|---|
+| `test_static_engine.py` | 5 | Rule engine behaviour |
+| `test_analysis_pipeline.py` | 32 | Phases 3A / 3C.2 — program graphs, root cause, remediation, `DetectionOrchestrator` |
+| `test_patch_generation.py` | 105 | Phase 3D.1 |
+| `test_patch_validation.py` | 26 | Phase 3D.2 |
+| `test_autonomous_repair.py` | 34 | Phase 3D.3 multi-agent loop |
+| `test_api_contract.py` | 16 | Cross-subsystem seams, model routing, documented extension points |
+| `test_integration_e2e.py` | 16 | detect → generate → validate → repair loop, against a real file |
+| `test_repository_scanner.py` | 34 | Repo traversal, graph indexes, `/repository/*` routes |
+| `test_groq_provider.py` | 4 | LLM fallback chain |
+| **Total** | **272** | |
+
+`test_integration_e2e.py` compiles with a real toolchain; the compilation
+cases skip automatically when `g++` is not on `PATH`.
 
 ---
 
@@ -399,7 +427,12 @@ Test breakdown:
 from backend.core.analysis.detection_orchestrator import DetectionOrchestrator
 
 orch   = DetectionOrchestrator()
-result = orch.run(code="void IRAM_ATTR my_isr() { delay(100); }", extension="cpp")
+result = orch.run(
+    code      = "void IRAM_ATTR my_isr() { delay(100); }",
+    extension = "cpp",
+    file_path = "src/driver.cpp",   # optional, but enables localization,
+)                                   # cross-file tracing, regression impact,
+                                    # and SARIF physical locations
 
 for ef in result.enriched_findings:
     print(ef.finding.rule_id, ef.finding.severity)
@@ -476,10 +509,22 @@ sarif    = ValidationReportGenerator.to_sarif(report)
 ```python
 from backend.core.ai.providers.factory import LLMProviderFactory
 from backend.core.autonomous_repair import RepairOrchestrator, RepairConfiguration
+from backend.core.patch_validation import PatchValidationConfig
 
 provider = LLMProviderFactory.get_provider("groq")
 config   = RepairConfiguration(max_iterations=5, acceptance_threshold=0.75)
-orchestrator = RepairOrchestrator(provider, config)
+
+# Toolchain settings for the validation step. Defaults are cmake + gcc with
+# regression testing on; override them to match the target project, or the
+# build will fail and no candidate can clear the acceptance threshold.
+validation_config = PatchValidationConfig(
+    compiler_type           = "gcc",
+    build_system            = "none",   # compile sources directly
+    regression_enabled      = False,
+    static_analysis_enabled = True,
+)
+
+orchestrator = RepairOrchestrator(provider, config, validation_config)
 
 session = await orchestrator.run(
     finding            = finding,      # NormalizedFinding
@@ -511,10 +556,46 @@ findings = AnalysisEngine().analyze_plain(code)   # List[NormalizedFinding]
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/analyze` | Full analysis — body: `{"code": "..."}` |
+| `POST` | `/analyze` | Single-snippet analysis — body: `{"code": "..."}` |
 | `GET` | `/rules` | List all active rules with metadata |
 | `GET` | `/health` | Server availability check |
 | `GET` | `/ollama/status` | LLM provider connectivity check |
+| `POST` | `/repository/scan` | Analyse a folder on this machine — body: `{"path": "..."}` |
+| `POST` | `/repository/upload` | Analyse an uploaded `.zip` (multipart `file`) |
+| `GET` | `/repository/scans` | List scans held in memory |
+| `GET` | `/repository/scan/{id}` | Re-fetch a completed scan |
+| `GET` | `/repository/scan/{id}/file?path=` | Source of one scanned file |
+| `GET` | `/repository/scan/{id}/export/{fmt}` | Download `json` \| `sarif` \| `markdown` \| `html` |
+
+Repository scanning runs the deterministic static pipeline only — **no API key
+is required** and no network calls are made. Traversal skips `.git`, `build`,
+`vendor`, `node_modules`, and similar directories, and is bounded by
+`max_files` (default 2000) and a 1 MB per-file cap.
+
+---
+
+## Using the UI
+
+With both servers running, open `http://localhost:3000`.
+
+**Repository scan** (default tab)
+1. Paste an absolute folder path — e.g. `C:\projects\firmware` — and press
+   **Scan folder**. Or click **Upload .zip** to analyse an archive; a
+   GitHub-style zip with a single top-level folder is unwrapped automatically.
+2. The summary strip shows files scanned, findings, files affected, suppressed
+   count, duration, and a severity breakdown.
+3. The left pane groups findings by file. Filter by text or click a severity
+   chip to narrow the list.
+4. Select a finding to see its confidence decomposition, the flagged line in
+   source context, the evidence, the root-cause chain with any alternative
+   hypotheses, the ranked repair strategies with scores, and the remediation.
+5. Download the whole scan as JSON, SARIF 2.1.0, Markdown, or HTML.
+
+**Snippet analyzer** (second tab) is the original Monaco editor flow. Unlike
+repository scanning it calls the LLM agents, so it needs `GROQ_API_KEY`.
+
+Throughput is roughly 5 ms per file on a warm filesystem cache — a 265-file C
+codebase scans in about 1.3 seconds.
 
 ---
 
@@ -572,7 +653,19 @@ class IntelCompiler(BaseCompiler):
     async def compile(self, workspace_path, source_files, build_command=None, timeout=30) -> CompilationResult:
         ...
 
-CompilerRegistry._compilers["intel"] = IntelCompiler
+CompilerRegistry.register("intel", IntelCompiler)
+```
+
+### Add a build system backend
+
+```python
+from backend.core.patch_validation.build_system import BaseBuildSystem, BuildSystemRegistry
+
+class MesonBuildSystem(BaseBuildSystem):
+    async def configure(self, workspace_path, compiler_type, parallel_jobs=4) -> bool: ...
+    async def build(self, workspace_path, compiler_type, parallel_jobs=4, timeout=60): ...
+
+BuildSystemRegistry.register("meson", MesonBuildSystem)
 ```
 
 ---

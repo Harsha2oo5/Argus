@@ -79,10 +79,12 @@ class RemediationReasoner:
         self,
         semantic_memory:       Optional[SemanticMemory] = None,
         min_correctness:       float = 0.40,
-        agent_consensus_score: float = 0.0,
+        agent_consensus_score: Optional[float] = None,
     ):
         self.memory               = semantic_memory or SemanticMemory()
         self.min_correctness      = min_correctness
+        # None means "no agents have run", which is distinct from a genuine
+        # consensus of 0.0 (all agents contradicted the strategy).
         self.agent_consensus_score= agent_consensus_score
 
     # ------------------------------------------------------------------
@@ -153,11 +155,28 @@ class RemediationReasoner:
         sim_results = self.memory.search(s.description, top_k=1)
         sim = sim_results[0]["score"] if sim_results else 0.0
 
-        # 2. Correctness estimate
-        correctness = round(
-            s.estimated_correctness * 0.40
-            + sim                    * 0.40
-            + self.agent_consensus_score * 0.20,
+        # 2. Correctness estimate.
+        #
+        #    The nominal formula is
+        #        static x 0.40 + semantic x 0.40 + consensus x 0.20
+        #    but semantic similarity and agent consensus are *optional*
+        #    signals. Scoring an unavailable signal as 0.0 does not express
+        #    "no evidence", it actively penalises the strategy: with an empty
+        #    SemanticMemory and no agents the score is capped at 0.40 x static,
+        #    which can never clear a 0.40 floor, so every strategy was rejected
+        #    and every plan came back NO_VIABLE_STRATEGY.
+        #
+        #    Instead, weight only the signals that are actually present and
+        #    renormalise so the weights always sum to 1.0.
+        weighted: List[tuple] = [(0.40, s.estimated_correctness)]
+        if self.memory.kb:
+            weighted.append((0.40, sim))
+        if self.agent_consensus_score is not None:
+            weighted.append((0.20, self.agent_consensus_score))
+
+        total_weight = sum(w for w, _ in weighted)
+        correctness  = round(
+            sum(w * v for w, v in weighted) / total_weight,
             4,
         )
 

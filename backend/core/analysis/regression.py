@@ -47,7 +47,8 @@ class AffectedComponent:
 class RegressionImpactReport:
     """Full regression impact analysis output."""
     finding_rule_id:      str
-    modified_spans:       List[str]          # file:line references of planned changes
+    # file:line references of planned changes — populated by RegressionAnalyzer.analyze()
+    modified_spans:       List[str] = field(default_factory=list)
     affected_components:  List[AffectedComponent] = field(default_factory=list)
     api_compat_verdict:   str  = "UNKNOWN"   # "SAFE" | "AT_RISK" | "UNKNOWN"
     security_flags:       List[str] = field(default_factory=list)

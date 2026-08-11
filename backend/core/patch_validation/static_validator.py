@@ -1,6 +1,7 @@
 import os
 import logging
-from typing import List
+from collections import Counter
+from typing import List, Tuple
 from backend.core.analysis.engine import AnalysisEngine
 from backend.core.analysis.schemas import NormalizedFinding
 from backend.core.patch_validation.validation_models import StaticReanalysisResult
@@ -14,6 +15,15 @@ class StaticValidator:
 
     def __init__(self) -> None:
         self.engine = AnalysisEngine()
+
+    @staticmethod
+    def _signature(finding: NormalizedFinding) -> Tuple[str, str]:
+        """
+        Identity of a finding that is stable across the line renumbering a
+        patch causes, but still distinguishes separate occurrences of the
+        same rule within one file.
+        """
+        return (finding.rule_id, (finding.line_text or "").strip())
 
     def validate_patch(
         self,
@@ -47,43 +57,59 @@ class StaticValidator:
             before_findings = self.engine.analyze_plain(original_code, extension=ext)
             after_findings = self.engine.analyze_plain(patched_code, extension=ext)
 
-            # Check if the target bug was removed
+            # ── Compare findings by signature, not line proximity ──────
+            #
+            # Matching on "same rule_id within +/-5 lines" conflates two
+            # different things: the bug we tried to fix, and an unrelated
+            # occurrence of the same rule that happens to sit nearby. A file
+            # with two hits for one rule a few lines apart would report the
+            # bug as unfixed even after the patch removed it.
+            #
+            # A signature of (rule_id, flagged source text) survives the line
+            # shifts a patch introduces while still distinguishing separate
+            # occurrences.
             target_rule_id = original_finding.get("rule_id")
-            target_line = original_finding.get("line_number")
+            target_line    = original_finding.get("line_number")
+            target_text    = (original_finding.get("line_text") or "").strip()
 
-            # Check if target bug exists in 'after' list (matching by rule_id and line alignment)
-            bug_still_present = False
-            for f in after_findings:
-                if f.rule_id == target_rule_id:
-                    # Allow slight line shifting check (e.g. within 5 lines offset)
-                    if target_line is None or f.line_number is None or abs(f.line_number - target_line) <= 5:
-                        bug_still_present = True
-                        break
+            before_sigs = Counter(self._signature(f) for f in before_findings)
+            after_sigs  = Counter(self._signature(f) for f in after_findings)
 
-            original_bug_removed = not bug_still_present
+            before_count = sum(1 for f in before_findings if f.rule_id == target_rule_id)
+            after_count  = sum(1 for f in after_findings  if f.rule_id == target_rule_id)
+            count_decreased = before_count > after_count
 
-            # Identify if new warnings/bugs were introduced by the patch
-            new_findings: List[NormalizedFinding] = []
-            for af in after_findings:
-                # Is af a new finding? Compare with before findings
-                is_new = True
-                for bf in before_findings:
-                    if af.rule_id == bf.rule_id:
-                        if af.line_number is not None and bf.line_number is not None:
-                            # If they are at similar lines with similar descriptions, it's not new
-                            if abs(af.line_number - bf.line_number) <= 5:
-                                is_new = False
-                                break
-                        else:
-                            is_new = False
-                            break
-                if is_new:
-                    # Double check it is not the original finding being matched
-                    if af.rule_id == target_rule_id:
-                        # If it is the original target bug, we already count it under original_bug_removed
-                        pass
-                    else:
-                        new_findings.append(af)
+            if target_text:
+                # Two independent signals, both required.
+                #
+                # Signature alone is not enough: appending a comment to the
+                # offending line changes its text without fixing anything, and
+                # the old signature would vanish.
+                #
+                # Count alone is not enough either: it cannot tell which of
+                # several same-rule hits went away.
+                #
+                # Demanding both keeps the validator conservative -- it errs
+                # toward "not fixed", which is the safe direction for a gate
+                # that decides whether to apply a patch automatically.
+                signature_gone = after_sigs[(target_rule_id, target_text)] == 0
+                original_bug_removed = signature_gone and count_decreased
+            elif before_count:
+                # No flagged text available; occurrence counting is all we have.
+                original_bug_removed = count_decreased
+            else:
+                # The rule never fired on the original file, so there is
+                # nothing to have removed. Do not claim success.
+                original_bug_removed = False
+
+            # Identify findings the patch introduced: signatures present after
+            # but not before (multiset difference excludes pre-existing ones).
+            introduced = after_sigs - before_sigs
+            new_findings: List[NormalizedFinding] = [
+                f for f in after_findings
+                if introduced.get(self._signature(f), 0) > 0
+                and f.rule_id != target_rule_id
+            ]
 
             warning_delta = len(after_findings) - len(before_findings)
 

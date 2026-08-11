@@ -30,8 +30,7 @@ class TestGroqProvider(unittest.TestCase):
         mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
 
         provider = GroqProvider()
-        loop = asyncio.get_event_loop()
-        res = loop.run_until_complete(provider.generate_completion_async(
+        res = asyncio.run(provider.generate_completion_async(
             prompt="hello",
             system_prompt="system",
             model="custom-model",
@@ -68,8 +67,7 @@ class TestGroqProvider(unittest.TestCase):
             ])
 
             provider = GroqProvider()
-            loop = asyncio.get_event_loop()
-            res = loop.run_until_complete(provider.generate_completion_async(
+            res = asyncio.run(provider.generate_completion_async(
                 prompt="hello",
                 model="primary-model"
             ))
@@ -104,8 +102,7 @@ class TestGroqProvider(unittest.TestCase):
             ])
 
             provider = GroqProvider()
-            loop = asyncio.get_event_loop()
-            res = loop.run_until_complete(provider.generate_completion_async(
+            res = asyncio.run(provider.generate_completion_async(
                 prompt="hello",
                 model="primary-model"
             ))

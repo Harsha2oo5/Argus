@@ -30,6 +30,7 @@ from backend.core.autonomous_repair.configuration import RepairConfiguration
 from backend.core.autonomous_repair.memory import RepairMemory
 from backend.core.autonomous_repair.metrics import RepairMetricsCollector
 from backend.core.autonomous_repair.repair_loop import RepairLoop
+from backend.core.patch_validation.configuration import PatchValidationConfig
 from backend.core.autonomous_repair.repair_models import (
     AgentRole,
     RepairSession,
@@ -49,9 +50,21 @@ class RepairOrchestrator:
         self,
         provider: BaseLLMProvider,
         config: Optional[RepairConfiguration] = None,
+        validation_config: Optional[PatchValidationConfig] = None,
     ) -> None:
+        """
+        Parameters
+        ----------
+        provider : Any ``BaseLLMProvider`` implementation.
+        config : Loop behaviour — iterations, thresholds, agents, weights.
+        validation_config : Toolchain settings handed to the Phase 3D.2
+            ``ValidationEngine`` (compiler, build system, whether regression
+            and static reanalysis run). Defaults to cmake + gcc; override it
+            to match the target project or no candidate will compile.
+        """
         self._provider = provider
         self._cfg = config or RepairConfiguration()
+        self._validation_cfg = validation_config
 
     async def run(
         self,
@@ -110,6 +123,7 @@ class RepairOrchestrator:
             memory=memory,
             audit_trail=audit,
             metrics_collector=metrics,
+            validation_config=self._validation_cfg,
         )
 
         # 4. Execute the Loop

@@ -39,7 +39,7 @@ class StateManager:
         path = self._get_path(execution.execution_id)
         try:
             with open(path, "w", encoding="utf-8") as f:
-                f.write(execution.json(indent=2))
+                f.write(execution.model_dump_json(indent=2))
             logger.debug(f"Saved execution checkpoint: {path}")
         except Exception as e:
             logger.error(f"Failed to save checkpoint '{execution.execution_id}': {e}")

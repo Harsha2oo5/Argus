@@ -43,7 +43,7 @@ async def orchestrate_async(code: str) -> dict:
     report_gen = ReportGeneratorAgent(provider)
 
     # ── Step 3: Semantic check ──────────────────────────────
-    best_dict = best.dict()
+    best_dict = best.model_dump()
     validation = await validator.validate_finding(code, best_dict)
 
     # ── Step 4: Fix generation ──────────────────────────────
@@ -59,7 +59,7 @@ async def orchestrate_async(code: str) -> dict:
 
     # ── Step 5: Report compilation ──────────────────────────
     # Convert list of Pydantic objects to dicts for ReportGenerator
-    findings_dicts = [f.dict() for f in findings]
+    findings_dicts = [f.model_dump() for f in findings]
     return report_gen.compile_report(
         findings=findings_dicts,
         validation_result=validation,

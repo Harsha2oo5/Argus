@@ -53,7 +53,11 @@ from backend.core.autonomous_repair.agent_manager import AgentManager
 from backend.core.autonomous_repair.repair_loop import RepairLoop
 from backend.core.autonomous_repair.orchestrator import RepairOrchestrator
 from backend.core.patch_generation.patch_models import StructuredPatch, FilePatch, PatchCandidate
-from backend.core.patch_validation.validation_models import ValidationReport, ValidationMetrics
+from backend.core.patch_validation.validation_models import (
+    ValidationReport,
+    ValidationMetrics,
+    Diagnostics,
+)
 
 
 class TestExceptions(unittest.TestCase):
@@ -278,6 +282,31 @@ class TestTerminationPolicy(unittest.TestCase):
         )
         self.assertEqual(reason, TerminationReason.ITERATION_LIMIT)
 
+    def test_termination_on_final_zero_based_iteration(self):
+        """
+        iteration_index is 0-based and checked after the iteration ran, so
+        index 4 is the 5th completed pass and must stop at max_iterations=5.
+        Comparing the raw index allowed a 6th iteration.
+        """
+        reason = self.policy.should_terminate(
+            iteration_index=4,
+            accepted=False,
+            consecutive_failures=0,
+            score_converged=False,
+            candidate_pool_size=2,
+        )
+        self.assertEqual(reason, TerminationReason.ITERATION_LIMIT)
+
+    def test_no_termination_before_limit(self):
+        reason = self.policy.should_terminate(
+            iteration_index=3,
+            accepted=False,
+            consecutive_failures=0,
+            score_converged=False,
+            candidate_pool_size=2,
+        )
+        self.assertIsNone(reason)
+
     def test_termination_convergence(self):
         reason = self.policy.should_terminate(
             iteration_index=2,
@@ -494,6 +523,122 @@ class TestRepairLoopAndOrchestrator(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(session.iterations), 1)
             self.assertIsNotNone(session.report)
             self.assertIsNotNone(session.audit_trail_jsonl)
+
+
+class TestRepairLoopNoCandidates(unittest.IsolatedAsyncioTestCase):
+    """
+    A generator that never produces candidates must still terminate.
+
+    The no-candidate branch used to `continue` straight to the next iteration,
+    skipping the termination policy -- and the wall-clock timeout lives inside
+    that same check. A persistently failing generator (missing API key,
+    retired model, provider outage) therefore looped forever.
+
+    Each test is wrapped in asyncio.wait_for so a regression surfaces as a
+    timeout failure rather than hanging the suite.
+    """
+
+    @staticmethod
+    def _finding():
+        finding = MagicMock()
+        finding.rule_id = "NULL_PTR"
+        finding.description = "Possible null pointer dereference"
+        finding.file_path = "src/main.cpp"
+        finding.line_number = 42
+        return finding
+
+    @staticmethod
+    def _orchestrator(**cfg_kw):
+        provider = AsyncMock()
+        provider.generate_completion_async.return_value = None
+        return RepairOrchestrator(provider, RepairConfiguration(**cfg_kw))
+
+    @patch("backend.core.autonomous_repair.repair_loop.ValidationEngine")
+    async def test_terminates_when_nothing_is_ever_generated(self, mock_val_engine_class):
+        """Pool never fills, so the loop stops with NO_CANDIDATES."""
+        mock_val_engine_class.return_value = MagicMock()
+        orchestrator = self._orchestrator(max_iterations=5, max_consecutive_failures=99)
+
+        with patch(
+            "backend.core.autonomous_repair.agents.patch_generator_agent.PatchGenerationEngine"
+        ) as mock_gen_engine_class:
+            mock_gen_engine = AsyncMock()
+            mock_gen_engine.generate.side_effect = RuntimeError("provider unavailable")
+            mock_gen_engine_class.return_value = mock_gen_engine
+
+            session = await asyncio.wait_for(
+                orchestrator.run(finding=self._finding(), code="int x;", bug_id="BUG-X"),
+                timeout=30,
+            )
+
+        self.assertFalse(session.accepted)
+        self.assertEqual(session.termination_reason, TerminationReason.NO_CANDIDATES)
+        # Must stop immediately rather than burning every iteration.
+        self.assertEqual(len(session.iterations), 1)
+        self.assertFalse(session.iterations[0].improved)
+        self.assertIn("iteration_end", session.audit_trail_jsonl)
+
+    @patch("backend.core.autonomous_repair.repair_loop.ValidationEngine")
+    async def test_terminates_when_generation_fails_after_a_success(self, mock_val_engine_class):
+        """
+        The harder path: the pool is non-empty, so NO_CANDIDATES does not
+        apply and the failed iterations must fall through to the iteration
+        limit instead of looping forever.
+        """
+        mock_val_engine = MagicMock()
+        mock_val_engine_class.return_value = mock_val_engine
+        # Scores below the acceptance threshold so the loop keeps going.
+        mock_val_engine.validate_patch = AsyncMock(return_value=ValidationReport(
+            patch_id="p1",
+            bug_id="BUG-X",
+            accepted=False,
+            metrics={"cand_1": ValidationMetrics(
+                compilation_success=True,
+                syntax_success=True,
+                bug_removal_rate=0.0,
+                regression_success=False,
+                score=0.1,
+            )},
+        ))
+
+        candidate = PatchCandidate(
+            candidate_id="cand_1",
+            original_code="int* p = nullptr; *p = 5;",
+            patched_code="int* p = nullptr; if (p) *p = 5;",
+            confidence=0.4,
+        )
+        good_patch = StructuredPatch(
+            bug_id="BUG-X",
+            file_patches=[FilePatch(file_path="src/main.cpp", candidates=[candidate])],
+        )
+
+        orchestrator = self._orchestrator(max_iterations=3, max_consecutive_failures=99)
+
+        with patch(
+            "backend.core.autonomous_repair.agents.patch_generator_agent.PatchGenerationEngine"
+        ) as mock_gen_engine_class:
+            mock_gen_engine = AsyncMock()
+            # Succeed once, then fail forever.
+            mock_gen_engine.generate.side_effect = [
+                good_patch,
+                RuntimeError("provider unavailable"),
+                RuntimeError("provider unavailable"),
+                RuntimeError("provider unavailable"),
+                RuntimeError("provider unavailable"),
+            ]
+            mock_gen_engine_class.return_value = mock_gen_engine
+
+            session = await asyncio.wait_for(
+                orchestrator.run(finding=self._finding(), code="int x;", bug_id="BUG-X"),
+                timeout=30,
+            )
+
+        self.assertFalse(session.accepted)
+        self.assertIn(
+            session.termination_reason,
+            (TerminationReason.ITERATION_LIMIT, TerminationReason.CONVERGENCE),
+        )
+        self.assertLessEqual(len(session.iterations), 3)
 
 
 if __name__ == "__main__":

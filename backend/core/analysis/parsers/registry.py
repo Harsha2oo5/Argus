@@ -14,6 +14,22 @@ class ParserRegistry:
     }
 
     @classmethod
+    def register(cls, extension: str, parser_class: Type[BaseParser]) -> None:
+        """
+        Map a file extension to a parser implementation.
+
+        This is the documented extension point for adding a language:
+
+            ParserRegistry.register("py", PythonParser)
+        """
+        cls._parsers[extension.lower().lstrip(".")] = parser_class
+
+    @classmethod
+    def supported_extensions(cls) -> list:
+        """Return every registered file extension."""
+        return sorted(cls._parsers)
+
+    @classmethod
     def get_parser(cls, extension: str) -> BaseParser:
         clean_ext = extension.lower().lstrip(".")
         parser_class = cls._parsers.get(clean_ext, CppParser)  # Default fallback to CppParser

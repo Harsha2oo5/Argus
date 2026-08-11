@@ -1,6 +1,8 @@
 import logging
 from typing import Dict, Any
 
+from backend.core.config import settings
+
 logger = logging.getLogger("backend.ai.router")
 
 
@@ -8,20 +10,25 @@ class ModelRoutingEngine:
     """Routes validation tasks to specific models based on reasoning complexity requirements."""
 
     def __init__(self):
-        # Configure model routing defaults
+        # Model IDs are sourced from Settings rather than hard-coded here, so
+        # there is a single place to update when a hosted model is retired.
+        fast_model      = settings.GROQ_MODEL
+        reasoning_model = settings.GROQ_REASONING_MODEL
+
         self.routes: Dict[str, Dict[str, Any]] = {
             "classification": {
-                "model": "llama3-8b-8192",
+                "model": fast_model,
                 "temperature": 0.0,
                 "max_tokens": 128
             },
             "static_validation": {
-                "model": "llama3-8b-8192",
+                "model": fast_model,
                 "temperature": 0.1,
                 "max_tokens": 1024
             },
             "complex_fix": {
-                "model": "llama-3.1-70b-versatile",  # Route complex repairs to larger models if supported
+                # Route complex repairs to the larger reasoning model.
+                "model": reasoning_model,
                 "temperature": 0.2,
                 "max_tokens": 2048
             }
